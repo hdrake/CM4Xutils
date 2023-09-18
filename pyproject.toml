@@ -1,0 +1,32 @@
+[project]
+name = "CM4utils"
+dynamic = ["version"]
+authors = [
+    {name="Henri F. Drake", email="hfdrake@uci.edu"},
+]
+description = "A package for loading and manipulating CM4 output"
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "netcdf4",
+    "xgcm",
+    "gfdl_utils @ git+https://github.com/hdrake/gfdl_utils.git@master"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/hdrake/CM4utils"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.version]
+path = "CM4utils/version.py"
