@@ -20,14 +20,25 @@ sg_dict = {
     "OM4p125": f"{pre}OM4p125/mosaic_c192_om4p125_bedmachine_v20210310_hydrographyKDunne20210614_unpacked/ocean_hgrid.nc"
 }
 
-def get_pathDict(run, time="*", add="*", snap=False, surface=False):
+exp_dict = {}
+for model in ["p25", "p125"]:
+    exp_dict[f"CM4{model}"] = {"sg":sg_dict[f"OM4{model}"]}
+    for odiv, pp in pp_dict.items():
+        for exp in ["historical", "piControl", "ssp585"]:
+            if (exp in pp) and (model in pp):
+                exp_dict[f"CM4{model}"][exp] = {"odiv":odiv, "pp":pp}
+
+coord_labels = {"natv": "", "zstr":"_z", "rho2":"_rho2"}
+
+def get_pathDict(run, coord="zstr", time="*", add="*", snap=False, surface=False):
     pp = pp_dict[run]
-    suff1 = "ly" if "OM4p125" not in pp and not(snap) else ""
-    suff2 = "_d2" if "OM4p125" in pp else ""
-    suff2 += "_snap" if snap else "" 
+    suff1 = "ly" if ((("p125" not in pp) and (coord!="rho2")) and not(snap)) else ""
+    suff2 = "_d2" if "p125" in pp else ""
+    suff2 += "_snap" if snap else ""
+    freq = coord_labels[coord] if not(snap) else "_z"
     return {
         "pp": pp,
-        "ppname": f"ocean_month{suff1}_z{suff2}",
+        "ppname": f"ocean_month{suff1}{freq}{suff2}",
         "out": "ts",
         "local": "monthly/5yr",
         "time": time,
@@ -41,36 +52,42 @@ def get_pathDict(run, time="*", add="*", snap=False, surface=False):
         "add": add
     }
 
-def load_averages_and_snapshots(run, time="*"):
+def load_averages_and_snapshots(run, coord="zstr", time="*"):
     averages = xr.merge([
-        gu.open_frompp(**get_pathDict(run, time=time), chunks={'time':1}),
-        gu.open_frompp(**get_pathDict(run, time=time, add=["*tos*", "*sos*"], surface=True), chunks={'time':1})
+        gu.open_frompp(**get_pathDict(run, coord=coord, time=time), chunks={'time':1}),
+        gu.open_frompp(**get_pathDict(run, coord=coord, time=time, add=["*tos*", "*sos*"], surface=True), chunks={'time':1})
     ])
-    snapshots = gu.open_frompp(**get_pathDict(run, time=time, snap=True), chunks={'time':1})
+    snapshots = gu.open_frompp(**get_pathDict(run, coord=coord, time=time, snap=True), chunks={'time':1})
     snapshots = snapshots.rename({
         **{'time':'time_bounds'},
         **{v:f"{v}_bounds" for v in snapshots.data_vars}
     })
     return xr.merge([averages, snapshots])
 
-def load_CM4highres_diags(testing=False):
-    time =      "185001*" if testing else "*"
-    time_ctrl = "010101*" if testing else "*"
+def load_CM4highres_diags(model, coord="zstr", test=False):
+    time =      "185001*" if test else "*"
+    time_ctrl = "010101*" if test else "*"
     
     # Load mass/heat/salt budget diagnostics align times
-    ctrl = load_averages_and_snapshots("odiv-230", time=time_ctrl)
-    hist = load_averages_and_snapshots("odiv-231", time=time)
-    if testing:
+    ctrl = load_averages_and_snapshots(exp_dict[model]["piControl"]["odiv"], coord=coord, time=time_ctrl)
+    hist = load_averages_and_snapshots(exp_dict[model]["historical"]["odiv"], coord=coord, time=time)
+    if test:
         ssp5 = hist
     else:
-        ssp5 = load_averages_and_snapshots("odiv-232", time=time)
+        ssp5 = load_averages_and_snapshots(exp_dict[model]["ssp585"]["odiv"], coord=coord, time=time)
         ssp5 = xr.merge([
-            xr.concat([hist.drop_dims('time'),        ssp5.drop_dims('time')], dim="time_bounds", combine_attrs="override"),
-            xr.concat([hist.drop_dims('time_bounds'), ssp5.drop_dims('time_bounds')], dim="time", combine_attrs="override"),
+            xr.concat(
+                [hist.drop_dims('time'),        ssp5.drop_dims('time')],
+                dim="time_bounds", combine_attrs="override"
+            ),
+            xr.concat(
+                [hist.drop_dims('time_bounds'), ssp5.drop_dims('time_bounds')],
+                dim="time", combine_attrs="override"
+            ),
         ], combine_attrs="override")
 
     # Align dates of control simulation with forced experiments that branch from it
-    if testing:
+    if test:
         pass
     else:
         # Control is longer than forced experiments for some reason
@@ -93,16 +110,16 @@ def load_CM4highres_diags(testing=False):
     ], dim="exp", combine_attrs="override")
     
     
-    if testing:
+    if test:
         # Only keep second fully year, to keep data load light
         ds = ds.isel(time=slice(12,24), time_bounds=slice(11, 24))
     else:
         # Get rid of first year since we don't have the initial snapshot of water masses
         ds = ds.isel(time=slice(12,None), time_bounds=slice(11,None))
     
-    path_dict = get_pathDict("odiv-230")
+    path_dict = get_pathDict(exp_dict[model]["piControl"]["odiv"])
     og = xr.open_dataset(gu.get_pathstatic(path_dict["pp"], path_dict["ppname"]))
-    sg = xr.open_dataset(sg_dict["OM4p25" if "OM4p25" in path_dict["pp"] else "OM4p125"])
+    sg = xr.open_dataset(exp_dict[model]["sg"])
 
     og = fix_geo_coords(og, sg)
     ds = add_grid_coords(ds, og)

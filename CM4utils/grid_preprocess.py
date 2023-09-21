@@ -40,6 +40,9 @@ def add_grid_coords(ds, og):
         'geolon_c': xr.DataArray(og['geolon_c'].values, dims=("yq", "xq",)),
         'geolat_c': xr.DataArray(og['geolat_c'].values, dims=("yq", "xq",)),
         'deptho':   xr.DataArray(og['deptho'].values, dims=("yh", "xh",)),
+        'wet_v':     xr.DataArray(og['wet_v'].values, dims=("yq", "xh",)),
+        'wet_u':     xr.DataArray(og['wet_u'].values, dims=("yh", "xq",)),
+        'wet':     xr.DataArray(og['wet'].values, dims=("yh", "xh",)),
     })
     ds['lat'] = ds['geolat']
     ds['lon'] = ds['geolon']
