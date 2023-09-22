@@ -53,15 +53,21 @@ def get_pathDict(run, coord="zstr", time="*", add="*", snap=False, surface=False
     }
 
 def load_averages_and_snapshots(run, coord="zstr", time="*"):
+    svars = ["*tos*", "*sos*", "*zos*"]
+    pdict_surf = get_pathDict(run, coord=coord, time=time, add=svars, surface=True)
+    pdict_int = get_pathDict(run, coord=coord, time=time)
     averages = xr.merge([
-        gu.open_frompp(**get_pathDict(run, coord=coord, time=time), chunks={'time':1}),
-        gu.open_frompp(**get_pathDict(run, coord=coord, time=time, add=["*tos*", "*sos*"], surface=True), chunks={'time':1})
+        gu.open_frompp(**pdict_int, chunks={'time':1}),
+        gu.open_frompp(**pdict_surf, chunks={'time':1})
     ])
-    snapshots = gu.open_frompp(**get_pathDict(run, coord=coord, time=time, snap=True), chunks={'time':1})
+    
+    pdict_snap = get_pathDict(run, coord=coord, time=time, snap=True)
+    snapshots = gu.open_frompp(**pdict_snap, chunks={'time':1})
     snapshots = snapshots.rename({
         **{'time':'time_bounds'},
         **{v:f"{v}_bounds" for v in snapshots.data_vars}
     })
+    
     return xr.merge([averages, snapshots])
 
 def load_CM4highres_diags(model, coord="zstr", test=False):

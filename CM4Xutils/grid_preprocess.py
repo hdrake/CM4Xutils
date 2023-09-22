@@ -52,25 +52,37 @@ def add_grid_coords(ds, og):
     return ds
 
 def ds_to_grid(ds):
+    
     coords={
         'X': {'center': 'xh', 'outer': 'xq'},
         'Y': {'center': 'yh', 'outer': 'yq'},
-        'Z': {'center': 'z_l', 'outer': 'z_i'}
     }
-    
+    if "rho2_l" in ds.dims:
+        coords = {
+            **coords,
+            **{'Z': {'center': 'rho2_l', 'outer': 'rho2_i'}}
+        }
+    elif "zl" in ds.dims:
+        coords = {
+            **coords,
+            **{'Z': {'center': 'zl', 'outer': 'zi'}}
+        }
+    elif "z_l" in ds.dims:
+        coords = {
+            **coords,
+            **{'Z': {'center': 'z_l', 'outer': 'z_i'}}
+        }
+        
     metrics = {
         ('X','Y'): "areacello",
     }
     
-    boundary = {
-        'X':'periodic', 'Y':'extend', 'Z':'extend'}
+    boundary = {"X":"periodic", "Y":"periodic", "Z":"extend"}
     
-    grid = Grid(
+    return Grid(
         ds,
         coords=coords,
         metrics=metrics,
         boundary=boundary,
         autoparse_metadata=False
     )
-    
-    return grid

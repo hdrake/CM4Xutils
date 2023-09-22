@@ -1,10 +1,10 @@
 [project]
-name = "CM4utils"
+name = "CM4Xutils"
 dynamic = ["version"]
 authors = [
     {name="Henri F. Drake", email="hfdrake@uci.edu"},
 ]
-description = "A package for loading and manipulating CM4 output"
+description = "A package for loading and manipulating CM4X output"
 readme = "README.md"
 requires-python = ">=3.8"
 classifiers = [
@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/hdrake/CM4utils"
+"Homepage" = "https://github.com/hdrake/CM4Xutils"
 
 [build-system]
 requires = ["hatchling"]
@@ -29,4 +29,4 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.version]
-path = "CM4utils/version.py"
+path = "CM4Xutils/version.py"
