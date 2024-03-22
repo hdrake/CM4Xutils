@@ -1,68 +1,70 @@
 import numpy as np
+import dask
 import xarray as xr
+import doralite
 import gfdl_utils.core as gu
 
 from .grid_preprocess import *
 
-pre = "/archive/Raphael.Dussin/FMS2019.01.03_devgfdl_"
-pp_dict = {
-    "odiv-230": f"{pre}20221223/CM4_piControl_c192_OM4p25_v8/gfdl.ncrc4-intel18-prod-openmp/pp",
-    "odiv-231": f"{pre}20221223/CM4_historical_c192_OM4p25/gfdl.ncrc4-intel18-prod-openmp/pp",
-    "odiv-232": f"{pre}20221223/CM4_ssp585_c192_OM4p25/gfdl.ncrc4-intel18-prod-openmp/pp",
-    "odiv-209": f"{pre}20210706/CM4_piControl_c192_OM4p125_v7/gfdl.ncrc4-intel18-prod-openmp/pp",
-    "odiv-255": f"{pre}20230608/CM4_historical_c192_OM4p125/gfdl.ncrc5-intel22-prod-openmp/pp",
-    "odiv-293": f"{pre}20230608/CM4_ssp585_c192_OM4p125/gfdl.ncrc5-intel22-prod-openmp/pp"
+exp_dict = {
+    "CM4Xp25": {
+        "hgrid": (
+            "/archive/Raphael.Dussin/datasets/OM4p25/"
+            "c192_OM4_025_grid_No_mg_drag_v20160808_unpacked/"
+            "ocean_hgrid.nc"
+        ),
+        "piControl-spinup": "odiv-210",
+        "piControl"       : "odiv-230",
+        "historical"      : "odiv-231",
+        "ssp585"          : "odiv-232"
+    },
+    "CM4Xp125": {
+        "hgrid": (
+            "/archive/Raphael.Dussin/datasets/OM4p125"
+            "/mosaic_c192_om4p125_bedmachine_v20210310_hydrographyKDunne20210614_unpacked/"
+            "ocean_hgrid.nc"
+        ),
+        "piControl"  : "odiv-313",
+        "historical" : "odiv-255",
+        "ssp585"     : "odiv-293",
+    }
 }
 
-pre = "/archive/Raphael.Dussin/datasets/"
-sg_dict = {
-    "OM4p25": f"{pre}OM4p25/c192_OM4_025_grid_No_mg_drag_v20160808_unpacked/ocean_hgrid.nc",
-    "OM4p125": f"{pre}OM4p125/mosaic_c192_om4p125_bedmachine_v20210310_hydrographyKDunne20210614_unpacked/ocean_hgrid.nc"
-}
-
-exp_dict = {}
-for model in ["p25", "p125"]:
-    exp_dict[f"CM4{model}"] = {"sg":sg_dict[f"OM4{model}"]}
-    for odiv, pp in pp_dict.items():
-        for exp in ["historical", "piControl", "ssp585"]:
-            if (exp in pp) and (model in pp):
-                exp_dict[f"CM4{model}"][exp] = {"odiv":odiv, "pp":pp}
-
-coord_labels = {"natv": "", "zstr":"_z", "rho2":"_rho2"}
-
-def get_pathDict(run, coord="zstr", time="*", add="*", snap=False, surface=False):
-    pp = pp_dict[run]
-    suff1 = "ly" if ((("p125" not in pp) and (coord!="rho2")) and not(snap)) else ""
-    suff2 = "_d2" if "p125" in pp else ""
-    suff2 += "_snap" if snap else ""
-    freq = coord_labels[coord] if not(snap) else "_z"
+def get_wmt_pathDict(model, exp, category, time="*", add="*"):
+    pp = doralite.dora_metadata(exp_dict[model][exp])['pathPP']
+    freq = "month"
+    ignore = ["1x1deg"]
+    coarsen = ["d2"] if model=="CM4Xp125" else []
+    if category=="surface":
+        ppname = gu.find_unique_variable(pp, "tos", require=[freq]+coarsen, ignore=ignore)
+    elif category=="tendency":
+        ppname = gu.find_unique_variable(pp, "opottemptend", require=[freq]+coarsen, ignore=ignore)
+    elif category=="snapshot":
+        ppname = gu.find_unique_variable(pp, "thetao", require=[freq]+["snap"]+coarsen, ignore=ignore)
+    else:
+        raise ValueError("Valid categories are 'surface', 'tendency', and 'snapshot'.")
+    local = gu.get_local(pp, ppname, "ts")
     return {
         "pp": pp,
-        "ppname": f"ocean_month{suff1}{freq}{suff2}",
+        "ppname": ppname,
         "out": "ts",
-        "local": "monthly/5yr",
-        "time": time,
-        "add": add
-    } if not(surface) else {
-        "pp": pp,
-        "ppname": f"ocean_monthly",
-        "out": "ts",
-        "local": "monthly/5yr",
+        "local": local,
         "time": time,
         "add": add
     }
 
-def load_averages_and_snapshots(run, coord="zstr", time="*"):
-    svars = ["*tos*", "*sos*", "*zos*"]
-    pdict_surf = get_pathDict(run, coord=coord, time=time, add=svars, surface=True)
-    pdict_int = get_pathDict(run, coord=coord, time=time)
-    averages = xr.merge([
-        gu.open_frompp(**pdict_int, chunks={'time':1}),
-        gu.open_frompp(**pdict_surf, chunks={'time':1})
-    ])
+chunks = {'time':1, 'xh':200, 'yh':200}
+def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=False):
+    pdict_tend = get_wmt_pathDict(model, exp, "tendency", time=time)
+    pdict_surf = get_wmt_pathDict(model, exp, "surface" , time=time, add=["tos", "sos"])
+    av_tend = gu.open_frompp(**pdict_tend, chunks=chunks, dmget=dmget, mirror=mirror)
+    av_surf = gu.open_frompp(**pdict_surf, chunks=chunks, dmget=dmget, mirror=mirror)
+    averages = xr.merge([av_tend, av_surf])
+    averages = swap_rho2_for_sigma2(averages)
     
-    pdict_snap = get_pathDict(run, coord=coord, time=time, snap=True)
-    snapshots = gu.open_frompp(**pdict_snap, chunks={'time':1})
+    pdict_snap = get_wmt_pathDict(model, exp, "snapshot", time=time)
+    snapshots = gu.open_frompp(**pdict_snap, chunks=chunks, dmget=dmget, mirror=mirror)
+    snapshots = swap_rho2_for_sigma2(snapshots)
     snapshots = snapshots.rename({
         **{'time':'time_bounds'},
         **{v:f"{v}_bounds" for v in snapshots.data_vars}
@@ -70,65 +72,111 @@ def load_averages_and_snapshots(run, coord="zstr", time="*"):
     
     return xr.merge([averages, snapshots])
 
-def load_CM4highres_diags(model, coord="zstr", test=False):
-    time =      "185001*" if test else "*"
-    time_ctrl = "010101*" if test else "*"
-    
+def load_wmt_diags_CM4X(model, test=False, dmget=False, mirror=False, interval="all"):
+    if test:
+        time =      "185001*"
+        time_ctrl = "010101*"
+        interval  = "1850"
+        load_hist = True
+        load_ssp5 = False
+    elif interval=="all":
+        time = "*"
+        time_ctrl = "*"
+        load_hist = True
+        load_ssp5 = True
+    elif interval.isnumeric():
+        if (int(interval)%5)==0:
+            time = f"{interval}01*"
+            time_ctrl = f"{str(int(interval)-1749).zfill(4)}01*"
+            load_hist = int(interval) < 2015
+            load_ssp5 = int(interval) >= 2015
+        else:
+            raise ValueError("interval must be an integer multiple of 5.")
+            
     # Load mass/heat/salt budget diagnostics align times
-    ctrl = load_averages_and_snapshots(exp_dict[model]["piControl"]["odiv"], coord=coord, time=time_ctrl)
-    hist = load_averages_and_snapshots(exp_dict[model]["historical"]["odiv"], coord=coord, time=time)
-    if test:
-        ssp5 = hist
-    else:
-        ssp5 = load_averages_and_snapshots(exp_dict[model]["ssp585"]["odiv"], coord=coord, time=time)
-        ssp5 = xr.merge([
-            xr.concat(
-                [hist.drop_dims('time'),        ssp5.drop_dims('time')],
-                dim="time_bounds", combine_attrs="override"
-            ),
-            xr.concat(
-                [hist.drop_dims('time_bounds'), ssp5.drop_dims('time_bounds')],
-                dim="time", combine_attrs="override"
-            ),
-        ], combine_attrs="override")
+    print(f"Loading {model}-piControl.")
+    ctrl = load_wmt_averages_and_snapshots(
+        model,
+        "piControl",
+        time=time_ctrl,
+        dmget=dmget,
+        mirror=mirror
+    )
+    
+    if load_hist:
+        print(f"Loading {model}-historical.")
+        hist = load_wmt_averages_and_snapshots(
+            model,
+            "historical",
+            time=time,
+            dmget=dmget,
+            mirror=mirror
+        )
+    if load_ssp5:
+        print(f"Loading {model}-ssp585.")
+        ssp5 = load_wmt_averages_and_snapshots(
+            model,
+            "ssp585",
+            time=time,
+            dmget=dmget,
+            mirror=mirror
+        )
+    if load_hist and load_ssp5:
+        forc = concat_scenarios(hist, ssp5)
+    elif load_hist:
+        forc = hist
+    elif load_ssp5:
+        forc = ssp5
 
-    # Align dates of control simulation with forced experiments that branch from it
+    ctrl = align_dates(ctrl, forc)
+    ds = xr.concat([
+        forc.expand_dims({'exp': ["forced"]}),
+        ctrl.expand_dims({'exp': ["control"]})
+    ], dim="exp", combine_attrs="override")
+    
     if test:
-        pass
-    else:
+        with dask.config.set(**{'array.slicing.split_large_chunks': True}):
+            # Only keep second full year, to keep data load light
+            ds = ds.isel(time=slice(12,24), time_bounds=slice(11, 24))
+
+    print(f"Assigning {model} grid coordinates.")
+    path_dict = get_wmt_pathDict(model, "piControl", "surface")
+    og = xr.open_dataset(gu.get_pathstatic(path_dict["pp"], path_dict["ppname"]))
+    sg = xr.open_dataset(exp_dict[model]["hgrid"])
+    
+    og = fix_geo_coords(og, sg)
+    ds = add_grid_coords(ds, og)
+    grid = ds_to_grid(ds)
+    
+    return grid
+
+def concat_scenarios(ds_list):
+    return xr.merge([
+        xr.concat([
+            ds.drop_dims([dim for dim in ds.dims if dim!=cdim])
+            for ds in ds_list
+        ], dim=cdim, combine_attrs="override")
+        for cdim in ds_list[0].dims if "time" in cdim
+    ], combine_attrs="override")
+
+def align_dates(ds_ctrl, ds_hist):
+    # Align dates of a control simulation (with nominal dates starting from year 0)
+    # to a historically-referenced simulation (e.g. with dates starting from 1850)
+    if interval=="all":
         # Control is longer than forced experiments for some reason
-        ctrl = ctrl.sel(time=ctrl.time[:-120], time_bounds=ctrl.time_bounds[:-120])
-        
+        with dask.config.set(**{'array.slicing.split_large_chunks': True}):
+            ctrl = ctrl.sel(
+                time=ctrl.time[:-120],
+                time_bounds=ctrl.time_bounds[:-120]
+            )
+
     ctrl_times, ctrl_time_bounds = ctrl.time.values.copy(), ctrl.time_bounds.values.copy()
     ctrl = ctrl.assign_coords({
-        'time': xr.DataArray(ssp5.time.values, dims=("time",)),
-        'time_bounds': xr.DataArray(ssp5.time_bounds.values, dims=("time_bounds",)),
+        'time': xr.DataArray(forc.time.values, dims=("time",)),
+        'time_bounds': xr.DataArray(forc.time_bounds.values, dims=("time_bounds",)),
     })
     # Keep record of original control dates for reference
     ctrl = ctrl.assign_coords({
         'time_original': xr.DataArray(ctrl_times, dims=("time",)),
         'time_bounds_original': xr.DataArray(ctrl_time_bounds, dims=("time_bounds",)),
     })
-    
-    ds = xr.concat([
-        ssp5.expand_dims({'exp': ["forced"]}),
-        ctrl.expand_dims({'exp': ["control"]})
-    ], dim="exp", combine_attrs="override")
-    
-    
-    if test:
-        # Only keep second fully year, to keep data load light
-        ds = ds.isel(time=slice(12,24), time_bounds=slice(11, 24))
-    else:
-        # Get rid of first year since we don't have the initial snapshot of water masses
-        ds = ds.isel(time=slice(12,None), time_bounds=slice(11,None))
-    
-    path_dict = get_pathDict(exp_dict[model]["piControl"]["odiv"])
-    og = xr.open_dataset(gu.get_pathstatic(path_dict["pp"], path_dict["ppname"]))
-    sg = xr.open_dataset(exp_dict[model]["sg"])
-
-    og = fix_geo_coords(og, sg)
-    ds = add_grid_coords(ds, og)
-    grid = ds_to_grid(ds)
-    
-    return grid

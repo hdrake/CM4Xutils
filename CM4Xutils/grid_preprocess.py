@@ -32,7 +32,9 @@ def add_grid_coords(ds, og):
     ds = ds.assign_coords({
         'areacello':xr.DataArray(og['areacello'].values, dims=("yh", "xh")),
         'geolon':   xr.DataArray(og['geolon'].values, dims=("yh", "xh")),
+        'lon':      xr.DataArray(og['geolon'].values, dims=("yh", "xh")),
         'geolat':   xr.DataArray(og['geolat'].values, dims=("yh", "xh")),
+        'lat':      xr.DataArray(og['geolat'].values, dims=("yh", "xh")),
         'geolon_u': xr.DataArray(og['geolon_u'].values, dims=("yh", "xq",)),
         'geolat_u': xr.DataArray(og['geolat_u'].values, dims=("yh", "xq",)),
         'geolon_v': xr.DataArray(og['geolon_v'].values, dims=("yq", "xh",)),
@@ -44,8 +46,6 @@ def add_grid_coords(ds, og):
         'wet_u':     xr.DataArray(og['wet_u'].values, dims=("yh", "xq",)),
         'wet':     xr.DataArray(og['wet'].values, dims=("yh", "xh",)),
     })
-    ds['lat'] = ds['geolat']
-    ds['lon'] = ds['geolon']
     if ("thkcello" not in ds) and ("volcello" in ds) and ("areacello" in ds):
         ds['thkcello'] = ds['volcello']/ds['areacello']
     
@@ -54,8 +54,10 @@ def add_grid_coords(ds, og):
 def ds_to_grid(ds):
     
     coords={
-        'X': {'center': 'xh', 'outer': 'xq'},
-        'Y': {'center': 'yh', 'outer': 'yq'},
+        'X': {k:v for (k,v) in {'center':'xh','outer':'xq'}.items()
+              if v in ds},
+        'Y': {k:v for (k,v) in {'center':'yh','outer':'yq'}.items()
+              if v in ds},
     }
     if "rho2_l" in ds.dims:
         coords = {
@@ -73,9 +75,12 @@ def ds_to_grid(ds):
             **{'Z': {'center': 'z_l', 'outer': 'z_i'}}
         }
         
-    metrics = {
-        ('X','Y'): "areacello",
-    }
+    if "areacello" in ds:
+        metrics = {
+            ('X','Y'): "areacello",
+        }
+    else:
+        metrics = {}
     
     boundary = {"X":"periodic", "Y":"periodic", "Z":"extend"}
     
@@ -86,3 +91,13 @@ def ds_to_grid(ds):
         boundary=boundary,
         autoparse_metadata=False
     )
+
+def swap_rho2_for_sigma2(ds):
+    if ("rhopot2" in ds.data_vars) and ("sigma2" not in ds.data_vars):
+        ds['sigma2'] = ds['rhopot2'] - 1000.
+    if all([c in ds.coords for c in ["rho2_l", "rho2_i"]]):
+        ds = ds.assign_coords({
+            "sigma2_l": ds.rho2_l - 1000.,
+            "sigma2_i": ds.rho2_i - 1000.
+        }).swap_dims({'rho2_l':'sigma2_l', 'rho2_i':'sigma2_i'})
+    return ds
