@@ -1,6 +1,8 @@
 import numpy as np
 import dask
 import xarray as xr
+import xwmt
+import xgcm
 import doralite
 import gfdl_utils.core as gu
 
@@ -24,6 +26,7 @@ exp_dict = {
             "/mosaic_c192_om4p125_bedmachine_v20210310_hydrographyKDunne20210614_unpacked/"
             "ocean_hgrid.nc"
         ),
+        "piControl-spinup" : "odiv-209",
         "piControl"  : "odiv-313",
         "historical" : "odiv-255",
         "ssp585"     : "odiv-293",
@@ -53,18 +56,15 @@ def get_wmt_pathDict(model, exp, category, time="*", add="*"):
         "add": add
     }
 
-chunks = {'time':1, 'xh':200, 'yh':200}
-def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=False):
+def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=False):    
     pdict_tend = get_wmt_pathDict(model, exp, "tendency", time=time)
     pdict_surf = get_wmt_pathDict(model, exp, "surface" , time=time, add=["tos", "sos"])
-    av_tend = gu.open_frompp(**pdict_tend, chunks=chunks, dmget=dmget, mirror=mirror)
-    av_surf = gu.open_frompp(**pdict_surf, chunks=chunks, dmget=dmget, mirror=mirror)
-    averages = xr.merge([av_tend, av_surf])
-    averages = swap_rho2_for_sigma2(averages)
-    
+    av_tend = gu.open_frompp(**pdict_tend, dmget=dmget, mirror=mirror)
+    av_surf = gu.open_frompp(**pdict_surf, dmget=dmget, mirror=mirror)
+    averages = xr.merge([av_tend, av_surf]).chunk({"time":1, "z_l":-1, "yh":-1, "xh":-1, "yq":-1, "xq":-1})
+
     pdict_snap = get_wmt_pathDict(model, exp, "snapshot", time=time)
-    snapshots = gu.open_frompp(**pdict_snap, chunks=chunks, dmget=dmget, mirror=mirror)
-    snapshots = swap_rho2_for_sigma2(snapshots)
+    snapshots = gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror).chunk({"time":1, "z_l":-1, "yh":-1, "xh":-1})
     snapshots = snapshots.rename({
         **{'time':'time_bounds'},
         **{v:f"{v}_bounds" for v in snapshots.data_vars}
@@ -128,7 +128,7 @@ def load_wmt_diags_CM4X(model, test=False, dmget=False, mirror=False, interval="
     elif load_ssp5:
         forc = ssp5
 
-    ctrl = align_dates(ctrl, forc)
+    ctrl = align_dates(ctrl, forc, interval=interval)
     ds = xr.concat([
         forc.expand_dims({'exp': ["forced"]}),
         ctrl.expand_dims({'exp': ["control"]})
@@ -147,6 +147,18 @@ def load_wmt_diags_CM4X(model, test=False, dmget=False, mirror=False, interval="
     og = fix_geo_coords(og, sg)
     ds = add_grid_coords(ds, og)
     grid = ds_to_grid(ds)
+
+    # Compute potential density variables
+    if model=="CM4Xp125":
+        coords = {'Z': {'center': 'z_l', 'outer': 'z_i'}}
+        wm_kwargs = {"coords": coords, "metrics":{}, "boundary":{"Z":"extend"}, "autoparse_metadata":False}
+        wm_averages = xwmt.WaterMass(xgcm.Grid(grid._ds[["thetao", "so", "thkcello", "z_i"]], **wm_kwargs))
+        grid._ds["sigma2"] = wm_averages.get_density("sigma2")
+        snapshot_state_vars = grid._ds[["thetao_bounds", "so_bounds", "thkcello_bounds", "z_i"]]
+        wm_snapshots = xwmt.WaterMass(xgcm.Grid(snapshot_state_vars.rename({v:v.split("_")[0] for v in snapshot_state_vars.data_vars}), **wm_kwargs))
+        grid._ds["sigma2_bounds"] = wm_snapshots.get_density("sigma2")
+    else:
+        grid._ds = swap_rho2_for_sigma2(grid._ds)
     
     return grid
 
@@ -159,7 +171,7 @@ def concat_scenarios(ds_list):
         for cdim in ds_list[0].dims if "time" in cdim
     ], combine_attrs="override")
 
-def align_dates(ds_ctrl, ds_hist):
+def align_dates(ctrl, forc, interval="all"):
     # Align dates of a control simulation (with nominal dates starting from year 0)
     # to a historically-referenced simulation (e.g. with dates starting from 1850)
     if interval=="all":
@@ -180,3 +192,5 @@ def align_dates(ds_ctrl, ds_hist):
         'time_original': xr.DataArray(ctrl_times, dims=("time",)),
         'time_bounds_original': xr.DataArray(ctrl_time_bounds, dims=("time_bounds",)),
     })
+
+    return ctrl
