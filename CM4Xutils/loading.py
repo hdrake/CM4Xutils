@@ -74,9 +74,9 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
 
 def load_wmt_diags_CM4X(model, test=False, dmget=False, mirror=False, interval="all"):
     if test:
-        time =      "185001*"
-        time_ctrl = "010101*"
-        interval  = "1850"
+        time =      "201001*"
+        time_ctrl = "026101*"
+        interval  = "2010"
         load_hist = True
         load_ssp5 = False
     elif interval=="all":
@@ -128,7 +128,7 @@ def load_wmt_diags_CM4X(model, test=False, dmget=False, mirror=False, interval="
     elif load_ssp5:
         forc = ssp5
 
-    ctrl = align_dates(ctrl, forc, interval=interval)
+    ctrl, forc = align_dates(ctrl, forc)
     ds = xr.concat([
         forc.expand_dims({'exp': ["forced"]}),
         ctrl.expand_dims({'exp': ["control"]})
@@ -171,26 +171,18 @@ def concat_scenarios(ds_list):
         for cdim in ds_list[0].dims if "time" in cdim
     ], combine_attrs="override")
 
-def align_dates(ctrl, forc, interval="all"):
+def align_dates(ds_ctrl, ds_hist):
     # Align dates of a control simulation (with nominal dates starting from year 0)
     # to a historically-referenced simulation (e.g. with dates starting from 1850)
-    if interval=="all":
-        # Control is longer than forced experiments for some reason
-        with dask.config.set(**{'array.slicing.split_large_chunks': True}):
-            ctrl = ctrl.sel(
-                time=ctrl.time[:-120],
-                time_bounds=ctrl.time_bounds[:-120]
-            )
-
-    ctrl_times, ctrl_time_bounds = ctrl.time.values.copy(), ctrl.time_bounds.values.copy()
-    ctrl = ctrl.assign_coords({
-        'time': xr.DataArray(forc.time.values, dims=("time",)),
-        'time_bounds': xr.DataArray(forc.time_bounds.values, dims=("time_bounds",)),
-    })
-    # Keep record of original control dates for reference
-    ctrl = ctrl.assign_coords({
-        'time_original': xr.DataArray(ctrl_times, dims=("time",)),
-        'time_bounds_original': xr.DataArray(ctrl_time_bounds, dims=("time_bounds",)),
-    })
-
-    return ctrl
+    for c in ["time", "time_bounds"]:
+        if not np.all([c in d for d in [ds_ctrl.dims, ds_hist.dims]]): continue
+        time_ctrl = ds_ctrl[c].copy()
+        ctrl_years = (time_ctrl.dt.year + (ds_hist[c].dt.year[0] - time_ctrl[c].dt.year[0])).values
+        hist_years = ds_hist[c].dt.year.values
+        ctrl_years_mask = np.array([y in hist_years for y in ctrl_years])
+        hist_years_mask = np.array([y in ctrl_years for y in hist_years])
+        ds_ctrl = ds_ctrl.isel({c:ctrl_years_mask})
+        ds_hist = ds_hist.isel({c:hist_years_mask})
+    
+        ds_ctrl = ds_ctrl.assign_coords({c: ds_hist[c], f"{c}_original": time_ctrl.isel({c:ctrl_years_mask})})
+    return ds_ctrl, ds_hist
