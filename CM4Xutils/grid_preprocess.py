@@ -3,16 +3,30 @@ import numpy as np
 from xgcm import Grid
 
 def fix_geo_coords(og, sg):
-    og = og.assign_coords({
-        'geolon'  : xr.DataArray(sg['x'][1::2,1::2].data, dims=["yh", "xh"]),
-        'geolat'  : xr.DataArray(sg['y'][1::2,1::2].data, dims=["yh", "xh"]),
-        'geolon_u': xr.DataArray(sg['x'][1::2,0::2].data, dims=["yh", "xq"]),
-        'geolat_u': xr.DataArray(sg['y'][1::2,0::2].data, dims=["yh", "xq"]),
-        'geolon_v': xr.DataArray(sg['x'][0::2,1::2].data, dims=["yq", "xh"]),
-        'geolat_v': xr.DataArray(sg['y'][0::2,1::2].data, dims=["yq", "xh"]),
-        'geolon_c': xr.DataArray(sg['x'][0::2,0::2].data, dims=["yq", "xq"]),
-        'geolat_c': xr.DataArray(sg['y'][0::2,0::2].data, dims=["yq", "xq"])
-    })
+    if og.sizes['xh'] == sg.sizes['nx']//2:
+        og = og.assign_coords({
+            'geolon'  : xr.DataArray(sg['x'][1::2,1::2].data, dims=["yh", "xh"]),
+            'geolat'  : xr.DataArray(sg['y'][1::2,1::2].data, dims=["yh", "xh"]),
+            'geolon_u': xr.DataArray(sg['x'][1::2,0::2].data, dims=["yh", "xq"]),
+            'geolat_u': xr.DataArray(sg['y'][1::2,0::2].data, dims=["yh", "xq"]),
+            'geolon_v': xr.DataArray(sg['x'][0::2,1::2].data, dims=["yq", "xh"]),
+            'geolat_v': xr.DataArray(sg['y'][0::2,1::2].data, dims=["yq", "xh"]),
+            'geolon_c': xr.DataArray(sg['x'][0::2,0::2].data, dims=["yq", "xq"]),
+            'geolat_c': xr.DataArray(sg['y'][0::2,0::2].data, dims=["yq", "xq"])
+        })
+    elif og.sizes['xh'] == sg.sizes['nx']//4:
+        og = og.assign_coords({
+            'geolon'  : xr.DataArray(sg['x'][2::4,2::4].data, dims=["yh", "xh"]),
+            'geolat'  : xr.DataArray(sg['y'][2::4,2::4].data, dims=["yh", "xh"]),
+            'geolon_u': xr.DataArray(sg['x'][2::4,0::4].data, dims=["yh", "xq"]),
+            'geolat_u': xr.DataArray(sg['y'][2::4,0::4].data, dims=["yh", "xq"]),
+            'geolon_v': xr.DataArray(sg['x'][0::4,2::4].data, dims=["yq", "xh"]),
+            'geolat_v': xr.DataArray(sg['y'][0::4,2::4].data, dims=["yq", "xh"]),
+            'geolon_c': xr.DataArray(sg['x'][0::4,0::4].data, dims=["yq", "xq"]),
+            'geolat_c': xr.DataArray(sg['y'][0::4,0::4].data, dims=["yq", "xq"])
+        })
+    else:
+        raise ValueError("ocean grid must be symmetric")
     return og
     
 def add_grid_coords(ds, og):
@@ -95,6 +109,8 @@ def ds_to_grid(ds):
 def swap_rho2_for_sigma2(ds):
     if ("rhopot2" in ds.data_vars) and ("sigma2" not in ds.data_vars):
         ds['sigma2'] = ds['rhopot2'] - 1000.
+    if ("rhopot2_bounds" in ds.data_vars) and ("sigma2_bounds" not in ds.data_vars):
+        ds['sigma2_bounds'] = ds['rhopot2_bounds'] - 1000.
     if all([c in ds.coords for c in ["rho2_l", "rho2_i"]]):
         ds = ds.assign_coords({
             "sigma2_l": ds.rho2_l - 1000.,
