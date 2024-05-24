@@ -26,10 +26,10 @@ exp_dict = {
             "/mosaic_c192_om4p125_bedmachine_v20210310_hydrographyKDunne20210614_unpacked/"
             "ocean_hgrid.nc"
         ),
-        "piControl-spinup" : "odiv-209",
-        "piControl"  : "odiv-313",
-        "historical" : "odiv-255",
-        "ssp585"     : "odiv-293",
+        "piControl-spinup": "odiv-209",
+        "piControl"       : "odiv-313",
+        "historical"      : "odiv-255",
+        "ssp585"          : "odiv-293",
     }
 }
 
@@ -63,8 +63,23 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     av_surf = gu.open_frompp(**pdict_surf, dmget=dmget, mirror=mirror)
     averages = xr.merge([av_tend, av_surf]).chunk({"time":1, "z_l":-1, "yh":-1, "xh":-1, "yq":-1, "xq":-1})
 
-    pdict_snap = get_wmt_pathDict(model, exp, "snapshot", time=time)
-    snapshots = gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror).chunk({"time":1, "z_l":-1, "yh":-1, "xh":-1})
+    if (time!="*") & (time!="185001*") & (time!="010101*"):
+        interval_preceeding = str(np.int64(time.split("*")[0][:-2]) - 5).zfill(4)
+        if interval_preceeding=="2010": # Only awkward case!
+            pdict_snap_preceeding = get_wmt_pathDict(model, "historical", "snapshot", time=f"{interval_preceeding}01*")
+        else:
+            pdict_snap_preceeding = get_wmt_pathDict(model, exp, "snapshot", time=f"{interval_preceeding}01*")
+        pdict_snap = get_wmt_pathDict(model, exp, "snapshot", time=time)
+        snapshots = xr.concat(
+            [
+                gu.open_frompp(**pdict_snap_preceeding, dmget=dmget, mirror=mirror).chunk({"time":1, "z_l":-1, "yh":-1, "xh":-1}).isel(time=-1),
+                gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror).chunk({"time":1, "z_l":-1, "yh":-1, "xh":-1})
+            ],
+            dim="time"
+        )
+    else:
+        pdict_snap = get_wmt_pathDict(model, exp, "snapshot", time=time)
+        snapshots = gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror).chunk({"time":1, "z_l":-1, "yh":-1, "xh":-1})
     snapshots = snapshots.rename({
         **{'time':'time_bounds'},
         **{v:f"{v}_bounds" for v in snapshots.data_vars}
@@ -72,7 +87,12 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     
     return xr.merge([averages, snapshots])
 
-def load_wmt_diags_CM4X(model, test=False, dmget=False, mirror=False, interval="all"):
+def load_wmt_grid(model, **kwargs):
+    ds = load_wmt_ds(model, **kwargs)
+    grid = make_grid(ds)
+    return grid
+
+def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
     if test:
         time =      "201001*"
         time_ctrl = "026101*"
@@ -94,7 +114,7 @@ def load_wmt_diags_CM4X(model, test=False, dmget=False, mirror=False, interval="
             raise ValueError("interval must be an integer multiple of 5.")
             
     # Load mass/heat/salt budget diagnostics align times
-    print(f"Loading {model}-piControl.")
+    print(f"Loading {model}-piControl for interval `{interval}`.")
     ctrl = load_wmt_averages_and_snapshots(
         model,
         "piControl",
@@ -104,7 +124,7 @@ def load_wmt_diags_CM4X(model, test=False, dmget=False, mirror=False, interval="
     )
     
     if load_hist:
-        print(f"Loading {model}-historical.")
+        print(f"Loading {model}-historical for interval `{interval}`.")
         hist = load_wmt_averages_and_snapshots(
             model,
             "historical",
@@ -113,7 +133,7 @@ def load_wmt_diags_CM4X(model, test=False, dmget=False, mirror=False, interval="
             mirror=mirror
         )
     if load_ssp5:
-        print(f"Loading {model}-ssp585.")
+        print(f"Loading {model}-ssp585 for interval `{interval}`.")
         ssp5 = load_wmt_averages_and_snapshots(
             model,
             "ssp585",
@@ -139,33 +159,35 @@ def load_wmt_diags_CM4X(model, test=False, dmget=False, mirror=False, interval="
             # Only keep second full year, to keep data load light
             ds = ds.isel(time=slice(12,24), time_bounds=slice(11, 24))
 
-    print(f"Assigning {model} grid coordinates.")
-    path_dict = get_wmt_pathDict(model, "piControl", "surface")
+    ds.attrs["model"] = model
+    
+    return ds
+
+def make_grid(ds):
+    print(f"Assigning {ds.attrs["model"]} grid coordinates.")
+    path_dict = get_wmt_pathDict(ds.attrs["model"], "piControl", "surface")
     og = xr.open_dataset(gu.get_pathstatic(path_dict["pp"], path_dict["ppname"]))
-    sg = xr.open_dataset(exp_dict[model]["hgrid"])
+    sg = xr.open_dataset(exp_dict[ds.attrs["model"]]["hgrid"])
     
     og = fix_geo_coords(og, sg)
     ds = add_grid_coords(ds, og)
     grid = ds_to_grid(ds)
 
     # Compute potential density variables
-    if model=="CM4Xp125":
-        coords = {'Z': {'center': 'z_l', 'outer': 'z_i'}}
-        wm_kwargs = {"coords": coords, "metrics":{}, "boundary":{"Z":"extend"}, "autoparse_metadata":False}
-        wm_averages = xwmt.WaterMass(xgcm.Grid(grid._ds[["thetao", "so", "thkcello", "z_i"]], **wm_kwargs))
-        grid._ds["sigma2"] = wm_averages.get_density("sigma2")
-        snapshot_state_vars = grid._ds[["thetao_bounds", "so_bounds", "thkcello_bounds", "z_i"]]
-        wm_snapshots = xwmt.WaterMass(xgcm.Grid(snapshot_state_vars.rename({v:v.split("_")[0] for v in snapshot_state_vars.data_vars}), **wm_kwargs))
-        grid._ds["sigma2_bounds"] = wm_snapshots.get_density("sigma2")
-    else:
-        grid._ds = swap_rho2_for_sigma2(grid._ds)
-    
+    coords = {'Z': {'center': 'z_l', 'outer': 'z_i'}}
+    wm_kwargs = {"coords": coords, "metrics":{}, "boundary":{"Z":"extend"}, "autoparse_metadata":False}
+    wm_averages = xwmt.WaterMass(xgcm.Grid(grid._ds[["thetao", "so", "thkcello", "z_i"]], **wm_kwargs))
+    grid._ds["sigma2"] = wm_averages.get_density("sigma2")
+    snapshot_state_vars = grid._ds[["thetao_bounds", "so_bounds", "thkcello_bounds", "z_i"]]
+    wm_snapshots = xwmt.WaterMass(xgcm.Grid(snapshot_state_vars.rename({v:v.split("_")[0] for v in snapshot_state_vars.data_vars}), **wm_kwargs))
+    grid._ds["sigma2_bounds"] = wm_snapshots.get_density("sigma2")
+
     return grid
 
 def concat_scenarios(ds_list):
     return xr.merge([
         xr.concat([
-            ds.drop_dims([dim for dim in ds.dims if dim!=cdim])
+            ds.drop_dims([dim for dim in ds.dims if (dim!=cdim) & ("time" in dim)])
             for ds in ds_list
         ], dim=cdim, combine_attrs="override")
         for cdim in ds_list[0].dims if "time" in cdim

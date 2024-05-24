@@ -96,7 +96,7 @@ def ds_to_grid(ds):
     else:
         metrics = {}
     
-    boundary = {"X":"periodic", "Y":"periodic", "Z":"extend"}
+    boundary = {"X":"periodic", "Y":"extend", "Z":"extend"}
     
     return Grid(
         ds,
@@ -105,15 +105,3 @@ def ds_to_grid(ds):
         boundary=boundary,
         autoparse_metadata=False
     )
-
-def swap_rho2_for_sigma2(ds):
-    if ("rhopot2" in ds.data_vars) and ("sigma2" not in ds.data_vars):
-        ds['sigma2'] = ds['rhopot2'] - 1000.
-    if ("rhopot2_bounds" in ds.data_vars) and ("sigma2_bounds" not in ds.data_vars):
-        ds['sigma2_bounds'] = ds['rhopot2_bounds'] - 1000.
-    if all([c in ds.coords for c in ["rho2_l", "rho2_i"]]):
-        ds = ds.assign_coords({
-            "sigma2_l": ds.rho2_l - 1000.,
-            "sigma2_i": ds.rho2_i - 1000.
-        }).swap_dims({'rho2_l':'sigma2_l', 'rho2_i':'sigma2_i'})
-    return ds
