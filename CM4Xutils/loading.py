@@ -56,7 +56,7 @@ def get_wmt_pathDict(model, exp, category, time="*", add="*"):
         "add": add
     }
 
-def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=False):    
+def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=False):
     pdict_tend = get_wmt_pathDict(model, exp, "tendency", time=time)
     pdict_surf = get_wmt_pathDict(model, exp, "surface" , time=time, add=["tos", "sos"])
     av_tend = gu.open_frompp(**pdict_tend, dmget=dmget, mirror=mirror)
@@ -84,7 +84,7 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
         **{'time':'time_bounds'},
         **{v:f"{v}_bounds" for v in snapshots.data_vars}
     })
-    
+
     return xr.merge([averages, snapshots])
 
 def load_wmt_grid(model, **kwargs):
@@ -112,7 +112,7 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
             load_ssp5 = int(interval) >= 2015
         else:
             raise ValueError("interval must be an integer multiple of 5.")
-            
+
     # Load mass/heat/salt budget diagnostics align times
     print(f"Loading {model}-piControl for interval `{interval}`.")
     ctrl = load_wmt_averages_and_snapshots(
@@ -122,7 +122,7 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
         dmget=dmget,
         mirror=mirror
     )
-    
+
     if load_hist:
         print(f"Loading {model}-historical for interval `{interval}`.")
         hist = load_wmt_averages_and_snapshots(
@@ -153,22 +153,22 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
         forc.expand_dims({'exp': ["forced"]}),
         ctrl.expand_dims({'exp': ["control"]})
     ], dim="exp", combine_attrs="override")
-    
+
     if test:
         with dask.config.set(**{'array.slicing.split_large_chunks': True}):
             # Only keep second full year, to keep data load light
             ds = ds.isel(time=slice(12,24), time_bounds=slice(11, 24))
 
     ds.attrs["model"] = model
-    
+
     return ds
 
 def make_grid(ds):
-    print(f"Assigning {ds.attrs["model"]} grid coordinates.")
+    print(f"Assigning {ds.attrs['model']} grid coordinates.")
     path_dict = get_wmt_pathDict(ds.attrs["model"], "piControl", "surface")
     og = xr.open_dataset(gu.get_pathstatic(path_dict["pp"], path_dict["ppname"]))
     sg = xr.open_dataset(exp_dict[ds.attrs["model"]]["hgrid"])
-    
+
     og = fix_geo_coords(og, sg)
     ds = add_grid_coords(ds, og)
     grid = ds_to_grid(ds)
@@ -205,6 +205,6 @@ def align_dates(ds_ctrl, ds_hist):
         hist_years_mask = np.array([y in ctrl_years for y in hist_years])
         ds_ctrl = ds_ctrl.isel({c:ctrl_years_mask})
         ds_hist = ds_hist.isel({c:hist_years_mask})
-    
+
         ds_ctrl = ds_ctrl.assign_coords({c: ds_hist[c], f"{c}_original": time_ctrl.isel({c:ctrl_years_mask})})
     return ds_ctrl, ds_hist
