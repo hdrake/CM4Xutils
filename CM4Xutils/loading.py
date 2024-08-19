@@ -5,6 +5,7 @@ import xwmt
 import xgcm
 import doralite
 import gfdl_utils.core as gu
+import cftime
 
 from .grid_preprocess import *
 
@@ -56,30 +57,47 @@ def get_wmt_pathDict(model, exp, category, time="*", add="*"):
         "add": add
     }
 
+chunk = {"time":1, "z_l":-1, "yh":-1, "xh":-1, "yq":-1, "xq":-1}
+chunk_center = {"time":1, "z_l":-1, "yh":-1, "xh":-1}
 def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=False):    
     pdict_tend = get_wmt_pathDict(model, exp, "tendency", time=time)
     pdict_surf = get_wmt_pathDict(model, exp, "surface" , time=time, add=["tos", "sos"])
     av_tend = gu.open_frompp(**pdict_tend, dmget=dmget, mirror=mirror)
     av_surf = gu.open_frompp(**pdict_surf, dmget=dmget, mirror=mirror)
-    averages = xr.merge([av_tend, av_surf]).chunk({"time":1, "z_l":-1, "yh":-1, "xh":-1, "yq":-1, "xq":-1})
+    averages = xr.merge([av_tend, av_surf]).chunk(chunk)
 
-    if (time!="*") & (time!="185001*") & (time!="010101*"):
+    # Case 1: We are either reading in all times or just the first 5-year interval.
+    # In either case, there is no prior 5 yr interval, so we're missing the initial snapshot.
+    if (time=="*") | (time=="000101*"):
+        pdict_snap = get_wmt_pathDict(model, exp, "snapshot", time=time)
+        snapshots = gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror).chunk(chunk_center)
+    
+    # Case 2: we are only reading in a specific 5 yr interval,
+    # in which case we also need the last snapshot from the prior interval.
+    elif (time!="*") & (time!="000101*"):
         interval_preceeding = str(np.int64(time.split("*")[0][:-2]) - 5).zfill(4)
-        if interval_preceeding=="2010": # Only awkward case!
-            pdict_snap_preceeding = get_wmt_pathDict(model, "historical", "snapshot", time=f"{interval_preceeding}01*")
+        # Awkward corner cases where the prior interval is actually from a different experiment
+        if interval_preceeding in ["0096", "1845"]:
+            pdict_snap_preceeding = get_wmt_pathDict(
+                model, "piControl-spinup", "snapshot", time=f"009601*"
+            )
+        elif interval_preceeding=="2010":
+            pdict_snap_preceeding = get_wmt_pathDict(
+                model, "historical", "snapshot", time=f"201001*"
+            )
         else:
-            pdict_snap_preceeding = get_wmt_pathDict(model, exp, "snapshot", time=f"{interval_preceeding}01*")
+            pdict_snap_preceeding = get_wmt_pathDict(
+                model, exp, "snapshot", time=f"{interval_preceeding}01*"
+            )
         pdict_snap = get_wmt_pathDict(model, exp, "snapshot", time=time)
         snapshots = xr.concat(
             [
-                gu.open_frompp(**pdict_snap_preceeding, dmget=dmget, mirror=mirror).chunk({"time":1, "z_l":-1, "yh":-1, "xh":-1}).isel(time=-1),
-                gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror).chunk({"time":1, "z_l":-1, "yh":-1, "xh":-1})
+                gu.open_frompp(**pdict_snap_preceeding, dmget=dmget, mirror=mirror).chunk(chunk_center).isel(time=-1),# only the last
+                gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror).chunk(chunk_center)
             ],
             dim="time"
         )
-    else:
-        pdict_snap = get_wmt_pathDict(model, exp, "snapshot", time=time)
-        snapshots = gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror).chunk({"time":1, "z_l":-1, "yh":-1, "xh":-1})
+
     snapshots = snapshots.rename({
         **{'time':'time_bounds'},
         **{v:f"{v}_bounds" for v in snapshots.data_vars}
@@ -97,31 +115,48 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
         time =      "201001*"
         time_ctrl = "026101*"
         interval  = "2010"
+        load_spin = False
+        load_ctrl = True
         load_hist = True
         load_ssp5 = False
     elif interval=="all":
         time = "*"
         time_ctrl = "*"
+        load_spin = True
+        load_ctrl = True
         load_hist = True
         load_ssp5 = True
     elif interval.isnumeric():
         if (int(interval)%5)==0:
             time = f"{interval}01*"
             time_ctrl = f"{str(int(interval)-1749).zfill(4)}01*"
-            load_hist = int(interval) < 2015
-            load_ssp5 = int(interval) >= 2015
+            load_spin = int(interval) < 1850
+            load_ctrl = 1850 <= int(interval)
+            load_hist = (1850 <= int(interval)) & (int(interval) < 2015)
+            load_ssp5 = 2015 <= int(interval)
         else:
             raise ValueError("interval must be an integer multiple of 5.")
             
     # Load mass/heat/salt budget diagnostics align times
-    print(f"Loading {model}-piControl for interval `{interval}`.")
-    ctrl = load_wmt_averages_and_snapshots(
-        model,
-        "piControl",
-        time=time_ctrl,
-        dmget=dmget,
-        mirror=mirror
-    )
+    if load_spin:
+        print(f"Loading {model}-piControl-spinup for interval `{interval}`.")
+        spinup = load_wmt_averages_and_snapshots(
+            model,
+            "piControl-spinup",
+            time=time_ctrl,
+            dmget=dmget,
+            mirror=mirror
+        )
+
+    if load_ctrl:
+        print(f"Loading {model}-piControl for interval `{interval}`.")
+        ctrl = load_wmt_averages_and_snapshots(
+            model,
+            "piControl",
+            time=time_ctrl,
+            dmget=dmget,
+            mirror=mirror
+        )
     
     if load_hist:
         print(f"Loading {model}-historical for interval `{interval}`.")
@@ -132,6 +167,7 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
             dmget=dmget,
             mirror=mirror
         )
+
     if load_ssp5:
         print(f"Loading {model}-ssp585 for interval `{interval}`.")
         ssp5 = load_wmt_averages_and_snapshots(
@@ -141,25 +177,58 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
             dmget=dmget,
             mirror=mirror
         )
+
     if load_hist and load_ssp5:
         forc = concat_scenarios(hist, ssp5)
     elif load_hist:
         forc = hist
     elif load_ssp5:
         forc = ssp5
+    
+    # The historical only branches off after the spin-up, we need to expand the
+    # exp dimension of the spinup and specify it for both the control and forced.
 
-    ctrl, forc = align_dates(ctrl, forc)
-    ds = xr.concat([
-        forc.expand_dims({'exp': ["forced"]}),
-        ctrl.expand_dims({'exp': ["control"]})
-    ], dim="exp", combine_attrs="override")
+    # Case 1: We are only loading in intervals from the spinup
+    if load_spin and not(load_ctrl):
+        ds = xr.concat([
+            spinup.expand_dims({'exp': ["forced"]}),
+            spinup.expand_dims({'exp': ["control"]})
+        ], dim="exp", combine_attrs="override")
+
+    # Case 2: We are loading in intervals from the control period (including forced runs)
+    elif load_ctrl:
+        ctrl, forc = align_dates(ctrl, forc)
+        ds = xr.concat([
+            forc.expand_dims({'exp': ["forced"]}),
+            ctrl.expand_dims({'exp': ["control"]})
+        ], dim="exp", combine_attrs="override")
+        
+        if load_spin:
+            spinup = xr.concat([
+                spinup.expand_dims({'exp': ["forced"]}),
+                spinup.expand_dims({'exp': ["control"]})
+            ], dim="exp", combine_attrs="override")
+            ds = concat_scenarios(spinup, ds)
     
     if test:
         with dask.config.set(**{'array.slicing.split_large_chunks': True}):
             # Only keep second full year, to keep data load light
             ds = ds.isel(time=slice(12,24), time_bounds=slice(11, 24))
 
+    ds.coords["exp"].attrs = {"long_name": "Experiment type"}
     ds.attrs["model"] = model
+    ds.attrs["description"] = (
+    f"""The {model} experimental design following Griffies et al.
+(to be submitted to JAMES around 09/2024).
+
+The `control` experiment type is a ocean-sea ice-atmosphere-land coupled
+climate model run with CO2 concentrations in the atmosphere
+prescribed at 280 ppm (preindustrial levels).
+
+The `forced` experiment type branches off from the preindustrial control
+in 1850 and is forced with historical CMIP6 forcings until 2014 and afterwards
+follows the SSP5-8.5 high-emissions forcing scenario."""
+    )
     
     return ds
 
@@ -168,6 +237,8 @@ def make_grid(ds):
     path_dict = get_wmt_pathDict(ds.attrs["model"], "piControl", "surface")
     og = xr.open_dataset(gu.get_pathstatic(path_dict["pp"], path_dict["ppname"]))
     sg = xr.open_dataset(exp_dict[ds.attrs["model"]]["hgrid"])
+
+    attrs = {c:ds.coords[c].attrs.copy() for c in ds.coords}
     
     og = fix_geo_coords(og, sg)
     ds = add_grid_coords(ds, og)
@@ -179,9 +250,13 @@ def make_grid(ds):
     wm_averages = xwmt.WaterMass(xgcm.Grid(grid._ds[["thetao", "so", "thkcello", "z_i"]], **wm_kwargs))
     grid._ds["sigma2"] = wm_averages.get_density("sigma2")
     snapshot_state_vars = grid._ds[["thetao_bounds", "so_bounds", "thkcello_bounds", "z_i"]]
-    wm_snapshots = xwmt.WaterMass(xgcm.Grid(snapshot_state_vars.rename({v:v.split("_")[0] for v in snapshot_state_vars.data_vars}), **wm_kwargs))
+    rename_vardict = {v:v.split("_")[0] for v in snapshot_state_vars.data_vars}
+    wm_snapshots = xwmt.WaterMass(xgcm.Grid(snapshot_state_vars.rename(rename_vardict), **wm_kwargs))
     grid._ds["sigma2_bounds"] = wm_snapshots.get_density("sigma2")
 
+    for (c,a) in attrs.items():
+        grid._ds.coords[c].attrs = a
+    
     return grid
 
 def concat_scenarios(ds_list):
@@ -199,12 +274,48 @@ def align_dates(ds_ctrl, ds_hist):
     for c in ["time", "time_bounds"]:
         if not np.all([c in d for d in [ds_ctrl.dims, ds_hist.dims]]): continue
         time_ctrl = ds_ctrl[c].copy()
-        ctrl_years = (time_ctrl.dt.year + (ds_hist[c].dt.year[0] - time_ctrl[c].dt.year[0])).values
+
+        # Need to address corner cases where spinup snapshots get added to piControl
+        historical_equivalent_dates = np.array([
+            cftime.DatetimeNoLeap(d.dt.year+1749,d.dt.month,d.dt.day,0,0,0,0,has_year_zero=True)
+            for d in ds_hist[c]
+        ])
+        c_corrected = xr.where(
+            ds_hist[c].dt.year < 1850,
+            historical_equivalent_dates,
+            ds_hist[c]
+        )
+        ds_hist = ds_hist.assign_coords({c: c_corrected})
+            
         hist_years = ds_hist[c].dt.year.values
+        ctrl_years = time_ctrl.dt.year.values
+        ctrl_years = (ctrl_years + (hist_years[0] - ctrl_years[0]))
         ctrl_years_mask = np.array([y in hist_years for y in ctrl_years])
         hist_years_mask = np.array([y in ctrl_years for y in hist_years])
         ds_ctrl = ds_ctrl.isel({c:ctrl_years_mask})
         ds_hist = ds_hist.isel({c:hist_years_mask})
     
-        ds_ctrl = ds_ctrl.assign_coords({c: ds_hist[c], f"{c}_original": time_ctrl.isel({c:ctrl_years_mask})})
+        ds_ctrl = ds_ctrl.assign_coords({
+            c: ds_hist[c],
+            f"{c}_since_init": time_ctrl.isel({c:ctrl_years_mask})
+        })
+
+    ds_hist.coords["time"].attrs = {
+        **ds_ctrl.coords["time_since_init"].attrs,
+        **{"long_name": "historical time", "cell_methods": "time:mean"}
+    }
+    ds_hist.coords["time_bounds"].attrs = {
+        **ds_ctrl.coords["time_bounds_since_init"].attrs,
+        **{"long_name": "historical time", "cell_methods": "time:point"}
+    }
+
+    ds_ctrl.coords["time_since_init"].attrs = {
+        **ds_ctrl.coords["time_since_init"].attrs,
+        **{"long_name": "time since model initialization", "cell_methods": "time:mean"}
+    }
+    ds_ctrl.coords["time_bounds_since_init"].attrs = {
+        **ds_ctrl.coords["time_bounds_since_init"].attrs,
+        **{"long_name": "time since model initialization", "cell_methods": "time:point"}
+    }
+        
     return ds_ctrl, ds_hist
