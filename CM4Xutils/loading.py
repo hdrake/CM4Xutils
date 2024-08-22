@@ -232,6 +232,82 @@ follows the SSP5-8.5 high-emissions forcing scenario."""
     
     return ds
 
+def load_tracer(odiv, tracer, time="*"):
+    meta = doralite.dora_metadata(odiv)
+    pp = meta['pathPP']
+    ppname = "ocean_inert_z"
+    if tracer == "agessc":
+        ppname = "ocean_annual_z_d2" if "p125" in meta["expName"] else "ocean_annual_z"
+    out = "ts"
+    local = gu.get_local(pp, ppname, out)
+    ds = gu.open_frompp(
+        pp, ppname, out, local, time, tracer,
+        dmget=True
+    )
+    ds = ds.chunk({"time":1, "z_l":-1})
+    
+    return ds
+
+def load_density(odiv, time="*"):
+    state_vars = ["thkcello", "thetao", "so"]
+    meta = doralite.dora_metadata(odiv)
+    pp = meta['pathPP']
+    ppname = "ocean_month_z" if "p125" in meta["expName"] else "ocean_monthly_z"
+    out = "ts"
+    local = gu.get_local(pp, ppname, out)
+    ds = gu.open_frompp(
+        pp, ppname, out, local, time, state_vars,
+        dmget=True
+    )
+    ds = ds.chunk({"time":1, "z_l":-1})
+
+    CM4X_z_i_levels = np.array([
+        0.000e+00, 5.000e+00, 1.500e+01, 2.500e+01, 4.000e+01, 6.250e+01,
+        8.750e+01, 1.125e+02, 1.375e+02, 1.750e+02, 2.250e+02, 2.750e+02,
+        3.500e+02, 4.500e+02, 5.500e+02, 6.500e+02, 7.500e+02, 8.500e+02,
+        9.500e+02, 1.050e+03, 1.150e+03, 1.250e+03, 1.350e+03, 1.450e+03,
+        1.625e+03, 1.875e+03, 2.250e+03, 2.750e+03, 3.250e+03, 3.750e+03,
+        4.250e+03, 4.750e+03, 5.250e+03, 5.750e+03, 6.250e+03, 6.750e+03
+    ])
+
+    if "z_i" not in ds.coords:
+        ds = ds.assign_coords({"z_i": xr.DataArray(
+            CM4X_z_i_levels, dims=("z_i",), attrs = {
+                'long_name': 'Depth at interface',
+                'units': 'meters',
+                'axis': 'Z',
+                'positive': 'down'
+            }
+        )})
+        
+    og = gu.open_static(pp, ppname)
+    model = [e for e,d in exp_dict.items() for k,v in d.items() if odiv==v][0]
+    sg = xr.open_dataset(exp_dict[model]["hgrid"])
+    og = fix_geo_coords(og, sg)
+    ds = add_grid_coords(ds, og)
+
+    # Compute potential density variables
+    coords = {'Z': {'center': 'z_l', 'outer': 'z_i'}}
+    wm_kwargs = {"coords": coords, "metrics":{}, "boundary":{"Z":"extend"}, "autoparse_metadata":False}
+    wm_averages = xwmt.WaterMass(xgcm.Grid(ds[["thetao", "so", "thkcello", "z_i"]], **wm_kwargs))
+    ds["sigma2"] = wm_averages.get_density("sigma2")
+    
+    return ds
+
+def load_transient_tracers(odiv, time="*"):
+    transient_tracers = ["cfc11", "cfc12", "sf6"]
+    try:
+        ds_transient_tracers = load_tracer(odiv, transient_tracers, time=time)
+    except:
+        print(f"No transient tracers for {odiv}")
+        ds_transient_tracers = xr.Dataset()
+    ds_thickness = load_density(odiv, time=time)
+    ds = xr.merge([ds_transient_tracers, ds_thickness], compat="override")
+
+    grid = ds_to_grid(ds, Zprefix="z")
+    
+    return grid
+
 def make_grid(ds):
     print(f"Assigning {ds.attrs["model"]} grid coordinates.")
     path_dict = get_wmt_pathDict(ds.attrs["model"], "piControl", "surface")

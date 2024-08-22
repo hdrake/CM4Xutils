@@ -3,7 +3,7 @@ from .grid_preprocess import *
 def horizontally_coarsen(ds, grid, dim):
     ds_coarse = xr.Dataset(attrs=ds.attrs)
 
-    coord_vars = ["areacello", "deptho", "wet", "wet_u", "wet_v"]
+    coord_vars = [e for e in ["areacello", "deptho", "wet", "wet_u", "wet_v"] if e in ds.coords]
     for v in list(ds.data_vars) + coord_vars:
         da = ds[v]
 
@@ -12,10 +12,14 @@ def horizontally_coarsen(ds, grid, dim):
             continue
             
         cell_method = {k:v for (k,v) in parse_cell_methods(da.cell_methods).items()}
-        dim_names = {
-            "X": grid._get_dims_from_axis(da, "X")[0],
-            "Y": grid._get_dims_from_axis(da, "Y")[0]
-        }
+        try:
+            dim_names = {
+                "X": grid._get_dims_from_axis(da, "X")[0],
+                "Y": grid._get_dims_from_axis(da, "Y")[0]
+            }
+        except:
+            print(f"Skipping {v} because independent of 'X' and 'Y' dims.")
+            continue
 
         for (dim_name, dim_var) in dim_names.items():
             if cell_method[dim_var] == "sum":
@@ -51,8 +55,8 @@ def horizontally_coarsen(ds, grid, dim):
     return ds_coarse
 
 def subsample_geocoords(ds_coarse, ds, grid, dim):
-    sy = dim["X"]
-    sx = dim["Y"]
+    sx = dim["X"]
+    sy = dim["Y"]
 
     ## corner coords
     sx0, sy0 = 0, 0
@@ -118,7 +122,7 @@ def subsample_geocoords(ds_coarse, ds, grid, dim):
         lonv,latv = "geolon_v", "geolat_v"
     elif (sx%2==1) & (sy%2==1):
         lonv,latv = "geolon", "geolat"
-        
+
     ds_coarse = ds_coarse.assign_coords({
         "geolon": xr.DataArray(
             ds[lonv].sel({xdim:ds[xdim][sx0::sx], ydim:ds[ydim][sy0::sy]}).values,

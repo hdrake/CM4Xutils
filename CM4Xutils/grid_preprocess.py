@@ -69,7 +69,7 @@ def add_grid_coords(ds, og):
 
     return ds
 
-def ds_to_grid(ds):
+def ds_to_grid(ds, Zprefix=None):
     
     coords={
         'X': {k:v for (k,v) in {'center':'xh','outer':'xq'}.items()
@@ -77,26 +77,37 @@ def ds_to_grid(ds):
         'Y': {k:v for (k,v) in {'center':'yh','outer':'yq'}.items()
               if v in ds},
     }
-    if "sigma2_l" in ds.dims:
+    if Zprefix is not None:
         coords = {
             **coords,
-            **{'Z': {'center': 'sigma2_l', 'outer': 'sigma2_i'}}
+            **{'Z': {'center': f'{Zprefix}_l', 'outer': f'{Zprefix}_i'}}
         }
-    elif "rho2_l" in ds.dims:
-        coords = {
-            **coords,
-            **{'Z': {'center': 'rho2_l', 'outer': 'rho2_i'}}
-        }
-    elif "zl" in ds.dims:
-        coords = {
-            **coords,
-            **{'Z': {'center': 'zl', 'outer': 'zi'}}
-        }
-    elif "z_l" in ds.dims:
-        coords = {
-            **coords,
-            **{'Z': {'center': 'z_l', 'outer': 'z_i'}}
-        }
+    else:
+        print("Inferring Z grid coordinate: ", end="")
+        if "sigma2_l" in ds.dims:
+            coords = {
+                **coords,
+                **{'Z': {'center': 'sigma2_l', 'outer': 'sigma2_i'}}
+            }
+            print("density `sigma2`")
+        elif "rho2_l" in ds.dims:
+            coords = {
+                **coords,
+                **{'Z': {'center': 'rho2_l', 'outer': 'rho2_i'}}
+            }
+            print("density `rho2`")
+        elif "zl" in ds.dims:
+            coords = {
+                **coords,
+                **{'Z': {'center': 'zl', 'outer': 'zi'}}
+            }
+            print("native `z`")
+        elif "z_l" in ds.dims:
+            coords = {
+                **coords,
+                **{'Z': {'center': 'z_l', 'outer': 'z_i'}}
+            }
+            print("depth `z_`")
         
     if "areacello" in ds:
         metrics = {
@@ -114,6 +125,48 @@ def ds_to_grid(ds):
         boundary=boundary,
         autoparse_metadata=False
     )
+
+def add_sigma2_coords(ds):
+    # Set up target coordinates
+    sigma2_coords = xr.open_dataset("data/sigma2_coords.nc")
+    for c in sigma2_coords.dims:
+        sigma2_coords.coords[c].attrs = sigma2_coords.coords[c.replace("sigma2", "rho2")].attrs
+        sigma2_coords.coords[c].attrs["long_name"] = sigma2_coords.coords[c].attrs["long_name"].replace(
+            "Potential Density", "Potential Density minus 1000 kg/m3"
+        )
+    sigma2_coords.coords["sigma2_l"].attrs["edges"] = "sigma2_i"
+
+    # Drop unnecessary or redundant variables
+    drop_vars = [
+        "obvfsq", "rsdo", "rsdoabsorb", "volcello", "volcello_bounds",
+        "uo", "vo", "uhml", "vhml"
+    ]
+    ds = xr.merge([
+        ds.drop_vars([v for v in drop_vars if v in ds]),
+        sigma2_coords
+    ])
+
+    # Add attributes for sigma2
+    ds.sigma2.attrs = {
+        "long_name": "Potential Density referenced to 2000 dbar (minus 1000 kg/m3)",
+        "units": "kg m-3",
+        "cell_methods": "area:mean z_l:mean yh:mean xh:mean time:mean",
+        "volume": "volcello",
+        "area": "areacello",
+        "time_avg_info": "average_T1,average_T2,average_DT",
+        "description": "Computed offline using the gsw python package implementation of TEOS10.",
+    }
+    if "sigma2_bounsd" in ds.data_vars:
+        ds.sigma2_bounds.attrs = {
+            "long_name": "Potential Density referenced to 2000 dbar (minus 1000 kg/m3)",
+            "units": "kg m-3",
+            "cell_methods": "area:mean z_l:mean yh:mean xh:mean time:point",
+            "volume": "volcello",
+            "area": "areacello",
+            "description": "Computed offline using the gsw python package implementation of TEOS10."
+        }
+
+    return ds
 
 def correct_cell_methods(ds):
     def correct_cell_method(v, cell_methods):
