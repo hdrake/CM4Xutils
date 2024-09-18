@@ -1,10 +1,12 @@
 from .grid_preprocess import *
+from .version import __version__
 
 def horizontally_coarsen(ds, grid, dim):
     ds_coarse = xr.Dataset(attrs=ds.attrs)
 
-    coord_vars = [e for e in ["areacello", "deptho", "wet", "wet_u", "wet_v"] if e in ds.coords]
+    coord_vars = [e for e in ["areacello", "deptho", "wet"] if e in ds.coords]
     for v in list(ds.data_vars) + coord_vars:
+        
         da = ds[v]
 
         if "cell_methods" not in da.attrs:
@@ -23,13 +25,13 @@ def horizontally_coarsen(ds, grid, dim):
 
         for (dim_name, dim_var) in dim_names.items():
             if cell_method[dim_var] == "sum":
-                da = da.coarsen(dim={dim_var:dim[dim_name]}).sum()
+                da = da.fillna(0.).coarsen(dim={dim_var:dim[dim_name]}).sum()
                 da = da.where(da!=0.)
             elif cell_method[dim_var] == "point":
                 da = da.sel({dim_var: da[dim_var][::dim[dim_name]]})
 
         if all([cell_method[dim_var] == "mean" for dim_var in dim_names.values()]):
-            A = grid.get_metric(da, ["X", "Y"])*ds.wet
+            A = grid.get_metric(da, ["X", "Y"])
             attrs = da.attrs
             Zcenter = grid.axes["Z"].coords["center"]
             cdim = {dim_var:dim[dim_name] for (dim_name, dim_var) in dim_names.items()}
@@ -41,17 +43,26 @@ def horizontally_coarsen(ds, grid, dim):
                 weight = A*h
             else:
                 weight = A
-            da = (da*weight).coarsen(dim=cdim).sum() / weight.coarsen(dim=cdim).sum()
+            da = (da*weight).fillna(0.).coarsen(dim=cdim).sum() / weight.fillna(0.).coarsen(dim=cdim).sum()
             da = da.where(da!=0) if v not in coord_vars else da
             da.attrs = attrs
-
+            
         if v in ds.data_vars:
             ds_coarse[v] = da
+            
         elif v in ds.coords:
-            ds_coarse = ds_coarse.assign_coords({v: da})
+            ds_coarse = ds_coarse.assign_coords({v: xr.DataArray(da.values, dims=da.dims)})
 
     ds_coarse = subsample_geocoords(ds_coarse, ds, grid, dim)
 
+    coarsening_comment = f"""Diagnostics have been conservatively coarsened by Henri F. Drake
+(hfdrake@uci.edu) using the CM4Xutils python package v{__version__}
+(https://github.com/hdrake/CM4Xutils) and with coarsening factors of {dim}. """
+    if "provenance" in ds_coarse.attrs:
+        ds_coarse.attrs["provenance"] += coarsening_comment
+    else: 
+        ds_coarse.attrs["provenance"] = coarsening_comment
+        
     return ds_coarse
 
 def subsample_geocoords(ds_coarse, ds, grid, dim):
@@ -136,5 +147,11 @@ def subsample_geocoords(ds_coarse, ds, grid, dim):
 
     for c in ds_coarse.coords:
         ds_coarse.coords[c].attrs = ds.coords[c].attrs
+
+    ds_coarse = ds_coarse.assign_coords({c: xr.DataArray(np.arange(0, ds_coarse[c].size), dims=(c,)) for c in ["xh", "yh", "xq", "yq"]})
+    ds_coarse["xh"].attrs = {"long_name":"cell center x-index (nominally longitude)", "cell_methods":"xh:point"}
+    ds_coarse["yh"].attrs = {"long_name":"cell center y-index (nominally latitude)",  "cell_methods":"yh:point"}
+    ds_coarse["xq"].attrs = {"long_name":"cell corner x-index (nominally longitude)", "cell_methods":"xq:point"}
+    ds_coarse["yq"].attrs = {"long_name":"cell corner y-index (nominally latitude)",  "cell_methods":"yq:point"}
     
     return ds_coarse
