@@ -1,3 +1,4 @@
+import os
 import xarray as xr
 import numpy as np
 from xgcm import Grid
@@ -128,12 +129,15 @@ def ds_to_grid(ds, Zprefix=None):
 
 def add_sigma2_coords(ds):
     # Set up target coordinates
-    sigma2_coords = xr.open_dataset("data/sigma2_coords.nc")
+    dirname = os.path.dirname(__file__)
+    filename = os.path.join(dirname, "../data/sigma2_coords.nc")
+    sigma2_coords = xr.open_dataset(filename)
     for c in sigma2_coords.dims:
         sigma2_coords.coords[c].attrs = sigma2_coords.coords[c.replace("sigma2", "rho2")].attrs
         sigma2_coords.coords[c].attrs["long_name"] = sigma2_coords.coords[c].attrs["long_name"].replace(
             "Potential Density", "Potential Density minus 1000 kg/m3"
         )
+        sigma2_coords.coords[c].attrs["cell_methods"] = f"{c}:point"
     sigma2_coords.coords["sigma2_l"].attrs["edges"] = "sigma2_i"
 
     # Drop unnecessary or redundant variables
@@ -156,7 +160,7 @@ def add_sigma2_coords(ds):
         "time_avg_info": "average_T1,average_T2,average_DT",
         "description": "Computed offline using the gsw python package implementation of TEOS10.",
     }
-    if "sigma2_bounsd" in ds.data_vars:
+    if "sigma2_bounds" in ds.data_vars:
         ds.sigma2_bounds.attrs = {
             "long_name": "Potential Density referenced to 2000 dbar (minus 1000 kg/m3)",
             "units": "kg m-3",

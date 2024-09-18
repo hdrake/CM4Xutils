@@ -107,7 +107,7 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
 
 def load_wmt_grid(model, **kwargs):
     ds = load_wmt_ds(model, **kwargs)
-    grid = make_grid(ds)
+    grid = make_wmt_grid(ds)
     return grid
 
 def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
@@ -240,10 +240,23 @@ def load_tracer(odiv, tracer, time="*"):
         ppname = "ocean_annual_z_d2" if "p125" in meta["expName"] else "ocean_annual_z"
     out = "ts"
     local = gu.get_local(pp, ppname, out)
-    ds = gu.open_frompp(
-        pp, ppname, out, local, time, tracer,
-        dmget=True
-    )
+    if (local.split("/")[1] == "5yr") or (time=="*"):
+        ds = gu.open_frompp(
+                pp, ppname, out, local, time, tracer,
+                dmget=True
+            )
+    elif (local.split("/")[0] == "annual") and (local.split("/")[1] == "10yr"):
+        if (int(time[:-1]) % 10) in [0,1]:
+            ds = gu.open_frompp(
+                pp, ppname, out, local, time, tracer,
+                dmget=True
+            ).isel(time=np.arange(0, 5, 1))
+        else:
+            ds = gu.open_frompp(
+                pp, ppname, out, local, str(int(time[:-1]) - 5).zfill(4) + "*", tracer,
+                dmget=True
+            ).isel(time=np.arange(5, 10, 1))
+  
     ds = ds.chunk({"time":1, "z_l":-1})
     
     return ds
@@ -260,6 +273,7 @@ def load_density(odiv, time="*"):
         dmget=True
     )
     ds = ds.chunk({"time":1, "z_l":-1})
+    attrs = {c:ds.coords[c].attrs.copy() for c in ds.coords}
 
     CM4X_z_i_levels = np.array([
         0.000e+00, 5.000e+00, 1.500e+01, 2.500e+01, 4.000e+01, 6.250e+01,
@@ -291,6 +305,23 @@ def load_density(odiv, time="*"):
     wm_kwargs = {"coords": coords, "metrics":{}, "boundary":{"Z":"extend"}, "autoparse_metadata":False}
     wm_averages = xwmt.WaterMass(xgcm.Grid(ds[["thetao", "so", "thkcello", "z_i"]], **wm_kwargs))
     ds["sigma2"] = wm_averages.get_density("sigma2")
+
+    for (c,a) in attrs.items():
+        ds.coords[c].attrs = a
+
+    ds.attrs["model"] = model
+    ds.attrs["description"] = (
+    f"""The {model} experimental design following Griffies et al.
+(to be submitted to JAMES around 09/2024).
+
+The `control` experiment type is a ocean-sea ice-atmosphere-land coupled
+climate model run with CO2 concentrations in the atmosphere
+prescribed at 280 ppm (preindustrial levels).
+
+The `forced` experiment type branches off from the preindustrial control
+in 1850 and is forced with historical CMIP6 forcings until 2014 and afterwards
+follows the SSP5-8.5 high-emissions forcing scenario."""
+    )
     
     return ds
 
@@ -305,10 +336,10 @@ def load_transient_tracers(odiv, time="*"):
     ds = xr.merge([ds_transient_tracers, ds_thickness], compat="override")
 
     grid = ds_to_grid(ds, Zprefix="z")
-    
+
     return grid
 
-def make_grid(ds):
+def make_wmt_grid(ds):
     print(f"Assigning {ds.attrs["model"]} grid coordinates.")
     path_dict = get_wmt_pathDict(ds.attrs["model"], "piControl", "surface")
     og = xr.open_dataset(gu.get_pathstatic(path_dict["pp"], path_dict["ppname"]))

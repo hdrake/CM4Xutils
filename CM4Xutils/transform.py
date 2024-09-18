@@ -1,4 +1,5 @@
 from .grid_preprocess import *
+from .version import __version__
 
 def remap_vertical_coord(coord, ds, grid):
 
@@ -21,13 +22,12 @@ def remap_vertical_coord(coord, ds, grid):
     ds_trans = xr.Dataset(coords=ds.drop_dims([Z_l, Z_i]).coords, attrs=ds.attrs)
     ds_trans.attrs["provenance"] = f"""Diagnostics have been conservatively remapped into monthly-mean
 {coord} coordinates by Henri F. Drake (hfdrake@uci.edu) using the
-CM4Xutils python package (https://github.com/hdrake/CM4Xutils)."""
+CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). """
 
     data_vars = (
         [v for v in ["thkcello", "thkcello_bounds"] if v in ds.data_vars] +
         [v for v in ds.data_vars if "thkcello" not in v]
     )
-
     for v in data_vars:
         if (
             (v not in [f"{coord}", "umo", "vmo"]) & # these already covered

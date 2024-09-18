@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
 
 import warnings
 
@@ -12,16 +10,48 @@ import doralite
 import gfdl_utils.core as gu
 from CM4Xutils import *
 
-import sys
+def remap_budgets_to_sigma2_and_coarsen(model, start_year):
+    
+    coarsen_dims = {
+        "CM4Xp25": {"X": 12, "Y": 12},
+        "CM4Xp125": {"X": 12, "Y": 10},
+    }
+    
+    with warnings.catch_warnings():
+        warnings.simplefilter(action='ignore', category=FutureWarning)
+        warnings.simplefilter(action='ignore', category=UserWarning)
+    
+        grid = load_wmt_grid(
+            model,
+            interval=str(start_year),
+            dmget=True
+        )
+        ds = add_sigma2_coords(grid._ds)
+        ds_sigma2 = xr.merge([
+            remap_vertical_coord("sigma2", ds, grid),
+            ds[["tos", "sos"]]
+        ])
+        grid_sigma2 = ds_to_grid(ds_sigma2)
 
-# model options: ["CM4Xp25", "CM4Xp125"]
-model = sys.argv[1]
-# experiment options: ["piControl-spinup", "piControl", "historical", "ssp585"]
-experiment = sys.argv[2]
+    with dask.config.set(**{'array.slicing.split_large_chunks': False}):
+        ds_sigma2_coarse = horizontally_coarsen(
+            ds_sigma2,
+            grid_sigma2,
+            dim = coarsen_dims[model]
+        )
+        ds_sigma2_coarse = ds_sigma2_coarse.assign_coords({"sigma2_i": ds_sigma2.coords["sigma2_i"]})
+        
 
-def remap_tracers_to_sigma2_and_coarsen(model, experiment, time="*"):
+    ordered_dims = ['exp', 'time', 'time_bounds', 'sigma2_l', 'sigma2_i', 'yh', 'yq', 'xh', 'xq']
+    ds_sigma2_coarse = ds_sigma2_coarse.transpose(*ordered_dims)
+
+    return ds_sigma2_coarse.chunk({d:-1 for d in ds_sigma2_coarse.dims})
+
+
+def remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year):
     odiv = exp_dict[model][experiment]
-
+    time = str(start_year).zfill(4)+"*"
+    
     # Coarsening factors
     coarsen_dims = {
         "CM4Xp25": {"X": 6, "Y": 6},
@@ -89,6 +119,7 @@ def remap_tracers_to_sigma2_and_coarsen(model, experiment, time="*"):
             grid_sigma2,
             coarsen_dims[model]
         )
+        ds_sigma2_coarse = ds_sigma2_coarse.assign_coords({"sigma2_i": ds_sigma2.coords["sigma2_i"]})
         
         dim = {
             k:v//2 if model=="CM4Xp125" else v
@@ -100,8 +131,12 @@ def remap_tracers_to_sigma2_and_coarsen(model, experiment, time="*"):
             dim
         )
     
-        ds_age_sigma2_coarse = ds_age_sigma2_coarse.assign_coords(ds_sigma2_coarse.coords)
+        ds_age_sigma2_coarse = (
+            ds_age_sigma2_coarse.assign_coords(ds_sigma2_coarse.coords)
+        )
         ds_sigma2_coarse["agessc"] = ds_age_sigma2_coarse["agessc"]
 
-    return ds_sigma2_coarse.chunk({"xh":-1, "yh":-1, "sigma2_l":-1})
+    ordered_dims = ['time', 'sigma2_l', 'sigma2_i', 'yh', 'yq', 'xh', 'xq']
+    ds_sigma2_coarse = ds_sigma2_coarse.transpose(*ordered_dims)
 
+    return ds_sigma2_coarse.chunk({d:-1 for d in ds_sigma2_coarse.dims})
