@@ -2,6 +2,27 @@ from .grid_preprocess import *
 from .version import __version__
 
 def horizontally_coarsen(ds, grid, dim):
+    """Horizontally coarsen a dataset by given coarsening factors.
+
+    Grid-aware coarsening, which uses the `cell_methods` attributes
+    of variables to determine whether a variable should be
+    summed, averaged, or subsampled in a particular dimension.
+
+    Parameters
+    ----------
+    ds : `xr.Dataset` containing coordinates and variables.
+    grid : `xgcm.Grid` object with axis and metric metadata
+    dim : mapping of horizontal axes to coarsening factors
+        A dictionary mapping the horizontal axes ("X" and "Y")
+        to the corresponding integer coarsening factor.
+        Currently requires coarsening factors to be divisors of
+        the corresponding dimension.
+        Example: `dim = {"X":2, "Y":2}`
+
+    Returns
+    -------
+    ds_coarse : horizontally coarsened `xr.Dataset`
+    """
     ds_coarse = xr.Dataset(attrs=ds.attrs)
 
     coord_vars = [e for e in ["areacello", "deptho", "wet"] if e in ds.coords]
@@ -66,6 +87,23 @@ def horizontally_coarsen(ds, grid, dim):
     return ds_coarse
 
 def subsample_geocoords(ds_coarse, ds, grid, dim):
+    """Subsample horizontal coordinates according to coarsening factors.
+
+    Overwrites a coarsened dataset's coordinates with the correct
+    subsampling of coordinates from the original dataset.
+
+    Parameters
+    ----------
+    ds_coarse : coarsened `xr.Dataset`, derived from `ds`
+    ds : original `xr.Dataset`
+    grid : original `grid`
+    dim : mapping of horizontal axes to coarsening factors
+        A dictionary mapping the horizontal axes ("X" and "Y")
+        to the corresponding integer coarsening factor.
+        Currently requires coarsening factors to be divisors of
+        the corresponding dimension.
+        Example: `dim = {"X":2, "Y":2}`
+    """
     sx = dim["X"]
     sy = dim["Y"]
 

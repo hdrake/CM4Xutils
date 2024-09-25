@@ -35,6 +35,7 @@ exp_dict = {
 }
 
 def get_wmt_pathDict(model, exp, category, time="*", add="*"):
+    """Retrieve dictionary of keyword arguments for `gfdl_utils.core.open_frompp`."""
     pp = doralite.dora_metadata(exp_dict[model][exp])['pathPP']
     freq = "month"
     ignore = ["1x1deg"]
@@ -59,7 +60,8 @@ def get_wmt_pathDict(model, exp, category, time="*", add="*"):
 
 chunk = {"time":1, "z_l":-1, "yh":-1, "xh":-1, "yq":-1, "xq":-1}
 chunk_center = {"time":1, "z_l":-1, "yh":-1, "xh":-1}
-def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=False):    
+def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=False):
+    """Load time-averaged water mass transformation budget diags and bounding snapshots"""
     pdict_tend = get_wmt_pathDict(model, exp, "tendency", time=time)
     pdict_surf = get_wmt_pathDict(model, exp, "surface" , time=time, add=["tos", "sos"])
     av_tend = gu.open_frompp(**pdict_tend, dmget=dmget, mirror=mirror)
@@ -106,11 +108,13 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     return xr.merge([averages, snapshots])
 
 def load_wmt_grid(model, **kwargs):
+    """Call `load_wmt_ds(model, **kwargs)` and build its corresponding `xgcm.Grid`."""
     ds = load_wmt_ds(model, **kwargs)
     grid = make_wmt_grid(ds)
     return grid
 
 def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
+    """Load a comprehensive CM4X dataset with all variables required to run `xwmb`."""
     if test:
         time =      "201001*"
         time_ctrl = "026101*"
@@ -233,6 +237,7 @@ follows the SSP5-8.5 high-emissions forcing scenario."""
     return ds
 
 def load_tracer(odiv, tracer, time="*"):
+    """Load a CM4X dataset with `tracer`."""
     meta = doralite.dora_metadata(odiv)
     pp = meta['pathPP']
     ppname = "ocean_inert_z"
@@ -262,6 +267,7 @@ def load_tracer(odiv, tracer, time="*"):
     return ds
 
 def load_density(odiv, time="*"):
+    """Load a CM4X dataset thermodynamics variables and derive sigma2."""
     state_vars = ["thkcello", "thetao", "so"]
     meta = doralite.dora_metadata(odiv)
     pp = meta['pathPP']
@@ -326,6 +332,7 @@ follows the SSP5-8.5 high-emissions forcing scenario."""
     return ds
 
 def load_transient_tracers(odiv, time="*"):
+    """Load all transient biogeochemical tracers and density."""
     transient_tracers = ["cfc11", "cfc12", "sf6"]
     try:
         ds_transient_tracers = load_tracer(odiv, transient_tracers, time=time)
@@ -339,24 +346,29 @@ def load_transient_tracers(odiv, time="*"):
 
     return grid
 
-def make_wmt_grid(ds):
-    print(f"Assigning {ds.attrs["model"]} grid coordinates.")
-    path_dict = get_wmt_pathDict(ds.attrs["model"], "piControl", "surface")
-    og = xr.open_dataset(gu.get_pathstatic(path_dict["pp"], path_dict["ppname"]))
-    sg = xr.open_dataset(exp_dict[ds.attrs["model"]]["hgrid"])
+def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
+    """Make a comprehensive `xwmb`-compatible `xgcm.Grid` object."""
 
     attrs = {c:ds.coords[c].attrs.copy() for c in ds.coords}
+
+    if overwrite_grid:
+        path_dict = get_wmt_pathDict(ds.attrs["model"], "piControl", "surface")
+        og = xr.open_dataset(gu.get_pathstatic(path_dict["pp"], path_dict["ppname"]))
+
+        if overwrite_supergrid:
+            print(f"Overriding {ds.attrs["model"]} grid coordinates from supergrid.")
+            sg = xr.open_dataset(exp_dict[ds.attrs["model"]]["hgrid"])
+            og = fix_geo_coords(og, sg)
     
-    og = fix_geo_coords(og, sg)
-    ds = add_grid_coords(ds, og)
+        ds = add_grid_coords(ds, og)
     grid = ds_to_grid(ds)
 
     # Compute potential density variables
-    coords = {'Z': {'center': 'z_l', 'outer': 'z_i'}}
+    coords = {'Z': grid.axes['Z'].coords}
     wm_kwargs = {"coords": coords, "metrics":{}, "boundary":{"Z":"extend"}, "autoparse_metadata":False}
-    wm_averages = xwmt.WaterMass(xgcm.Grid(grid._ds[["thetao", "so", "thkcello", "z_i"]], **wm_kwargs))
+    wm_averages = xwmt.WaterMass(xgcm.Grid(grid._ds[["thetao", "so", "thkcello", coords["Z"]["outer"]]], **wm_kwargs))
     grid._ds["sigma2"] = wm_averages.get_density("sigma2")
-    snapshot_state_vars = grid._ds[["thetao_bounds", "so_bounds", "thkcello_bounds", "z_i"]]
+    snapshot_state_vars = grid._ds[["thetao_bounds", "so_bounds", "thkcello_bounds", coords["Z"]["outer"]]]
     rename_vardict = {v:v.split("_")[0] for v in snapshot_state_vars.data_vars}
     wm_snapshots = xwmt.WaterMass(xgcm.Grid(snapshot_state_vars.rename(rename_vardict), **wm_kwargs))
     grid._ds["sigma2_bounds"] = wm_snapshots.get_density("sigma2")
@@ -367,6 +379,7 @@ def make_wmt_grid(ds):
     return grid
 
 def concat_scenarios(ds_list):
+    """Concatinate scenarios in list over all "time" dimensions."""
     return xr.merge([
         xr.concat([
             ds.drop_dims([dim for dim in ds.dims if (dim!=cdim) & ("time" in dim)])
@@ -376,6 +389,18 @@ def concat_scenarios(ds_list):
     ], combine_attrs="override")
 
 def align_dates(ds_ctrl, ds_hist):
+    """Align dates of CM4X piControl and forced experiments
+    
+    Parameters
+    ----------
+    ds_ctrl : piControl or piControl_spinup simulation (starting in 0001)
+    ds_hist : historical or other forced simulation (branching as 1850 in 0101)
+
+    Returns
+    -------
+    (ds_ctrl, ds_hist) : input datasets with modified time coordinates
+    
+    """
     # Align dates of a control simulation (with nominal dates starting from year 0)
     # to a historically-referenced simulation (e.g. with dates starting from 1850)
     for c in ["time", "time_bounds"]:
@@ -411,18 +436,20 @@ def align_dates(ds_ctrl, ds_hist):
         **ds_ctrl.coords["time_since_init"].attrs,
         **{"long_name": "historical time", "cell_methods": "time:mean"}
     }
-    ds_hist.coords["time_bounds"].attrs = {
-        **ds_ctrl.coords["time_bounds_since_init"].attrs,
-        **{"long_name": "historical time", "cell_methods": "time:point"}
-    }
+    if "time_bounds" in ds_hist.coords:
+        ds_hist.coords["time_bounds"].attrs = {
+            **ds_ctrl.coords["time_bounds_since_init"].attrs,
+            **{"long_name": "historical time", "cell_methods": "time:point"}
+        }
 
     ds_ctrl.coords["time_since_init"].attrs = {
         **ds_ctrl.coords["time_since_init"].attrs,
         **{"long_name": "time since model initialization", "cell_methods": "time:mean"}
     }
-    ds_ctrl.coords["time_bounds_since_init"].attrs = {
-        **ds_ctrl.coords["time_bounds_since_init"].attrs,
-        **{"long_name": "time since model initialization", "cell_methods": "time:point"}
-    }
+    if "time_bounds_since_init" in ds_ctrl.coords:
+        ds_ctrl.coords["time_bounds_since_init"].attrs = {
+            **ds_ctrl.coords["time_bounds_since_init"].attrs,
+            **{"long_name": "time since model initialization", "cell_methods": "time:point"}
+        }
         
     return ds_ctrl, ds_hist

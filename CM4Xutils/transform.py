@@ -2,6 +2,32 @@ from .grid_preprocess import *
 from .version import __version__
 
 def remap_vertical_coord(coord, ds, grid):
+    """"Remap vertical coordinate to target coordinate
+
+    Uses `cell_method` attribute in `ds.data_vars` variables
+    to determine how to vertically remap. For extensive 
+    variables (e.g. with `"zl:sum" in `cell_method`), we simply
+    do a conservative remapping. For intensive variables (e.g.
+    with `"zl:mean"`), however, we need to conservatively remap
+    both the variable and corresponding cell thicknesses, then
+    divide the remapped extensive content by the remapped thickness
+    to get the intensive values.
+
+    For `umo` and `vmo`, we interpolate the target tracer concentration
+    onto the corresponding cell faces and then do the remapping.
+
+    Parameters
+    ----------
+    coord : str
+        Name of vertical coordinate variable.
+        Only tested case is "sigma2".
+    ds : `xr.Dataset`
+    grid : `xgcm.Grid`
+
+    Returns
+    -------
+    ds_trans : transformed `xr.Dataset`
+    """
 
     def transform_to_target_coord(da, target_coord):
         return (

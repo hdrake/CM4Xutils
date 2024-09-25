@@ -15,7 +15,10 @@ classifiers = [
 dependencies = [
     "netcdf4",
     "xgcm",
-    "gfdl_utils @ git+https://github.com/hdrake/gfdl_utils.git@master"
+    "cftime",
+    "doralite @ git+https://github.com/hdrake/doralite.git@master",
+    "gfdl_utils @ git+https://github.com/hdrake/gfdl_utils.git@master",
+    "xwmt @ git+https://github.com/hdrake/xwmt.git@main"
 ]
 
 [project.urls]

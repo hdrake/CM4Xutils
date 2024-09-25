@@ -4,6 +4,27 @@ import numpy as np
 from xgcm import Grid
 
 def fix_geo_coords(og, sg):
+    """Fix geographical coordinates from static file with supergrid
+
+    The geographical coordinates (e.g. `geolon` and geolat`) in CM4X
+    static files are generally wrong. The true CM4X grid information
+    resides in the supergrid ("hgrid") file, which contains the
+    coordinates of all horizontal cell centers, faces, and corners.
+
+    This function additionally infers whether the static file has
+    already been coarsened by a factor of 2 (as for "d2" diagnostics)
+    and also corrects those coordinates from the supergrid.
+
+    Parameters
+    ----------
+    og : `xr.Dataset` containing CM4X static file grid coordinates
+    sg : `xr.Dataset` containing CM4X supergrid (or "hgrid") coordinates
+
+    Returns
+    -------
+    og : A corrected `xr.Dataset` containing CM4X grid coordinates
+    
+    """
     if og.sizes['xh'] == sg.sizes['nx']//2:
         og = og.assign_coords({
             'geolon'  : xr.DataArray(sg['x'][1::2,1::2].data, dims=("yh", "xh"), attrs=og.geolon.attrs),
@@ -30,11 +51,27 @@ def fix_geo_coords(og, sg):
         raise ValueError("ocean grid must be symmetric")
     return og
     
-def add_grid_coords(ds, og):    
+def add_grid_coords(ds, og):
+    """Assigns ocean grid coordinates to a dataset with diagnostic variables.
+
+    Parameters
+    ----------
+    ds : `xr.Dataset` containing CM4X diagnostics
+    og : `xr.Dataset` containing CM4X coordinates
+        Must contain the following coordinates, which are standard in
+        static files: ["areacello", "geolon", "geolat", "geolon_c",
+        "geolat_c", "geolon_u", "geolat_u", "geolon_v", "geolat_v",
+        "dxCv", "dyCu", "deptho", "areacello", "wet", "wet_u", "wet_v"].
+
+    Returns
+    -------
+    ds : `xr.Dataset` containing both CM4X diagnostics and coordinates
+    """
+    
     og['deptho'] = (
         og['deptho'].where(~np.isnan(og['deptho']), 0.)
     )
-    
+
     ds = ds.assign_coords({
         'dxCv': xr.DataArray(
             og['dxCv'].transpose('xh', 'yq').values, dims=('xh', 'yq',),
@@ -71,7 +108,22 @@ def add_grid_coords(ds, og):
     return ds
 
 def ds_to_grid(ds, Zprefix=None):
+    """Instantiate a `xwmb`-compatiable `xgcm.Grid` object.
     
+    Parameters
+    ----------
+    ds : `xr.Dataset` containing CM4X data variables and coordinates
+    Zprefix : `str` describing the dataset's vertical coordinate (default: `None`)
+        If `None`, then it attempts to infer the vertical coordinate from the
+        names of the dataset's dimensions.
+        Support options: ["sigma2", "rho2", "z", "z_"]
+
+    Returns
+    -------
+    grid : `xgcm.Grid` object formatted as required by the `sectionate` and `regionate`
+    packages as well as the `xwmt.WaterMassTransformation` and `xwmb.WaterMassBudget`
+    constructor methods.
+    """
     coords={
         'X': {k:v for (k,v) in {'center':'xh','outer':'xq'}.items()
               if v in ds},
@@ -128,38 +180,50 @@ def ds_to_grid(ds, Zprefix=None):
     )
 
 def add_sigma2_coords(ds):
-    # Set up target coordinates
-    dirname = os.path.dirname(__file__)
-    filename = os.path.join(dirname, "../data/sigma2_coords.nc")
-    sigma2_coords = xr.open_dataset(filename)
-    for c in sigma2_coords.dims:
-        sigma2_coords.coords[c].attrs = sigma2_coords.coords[c.replace("sigma2", "rho2")].attrs
-        sigma2_coords.coords[c].attrs["long_name"] = sigma2_coords.coords[c].attrs["long_name"].replace(
-            "Potential Density", "Potential Density minus 1000 kg/m3"
-        )
-        sigma2_coords.coords[c].attrs["cell_methods"] = f"{c}:point"
-    sigma2_coords.coords["sigma2_l"].attrs["edges"] = "sigma2_i"
+    """Add the standard CM4X 72-layer sigma2 coordinates to dataset.
 
-    # Drop unnecessary or redundant variables
-    drop_vars = [
-        "obvfsq", "rsdo", "rsdoabsorb", "volcello", "volcello_bounds",
-        "uo", "vo", "uhml", "vhml"
-    ]
-    ds = xr.merge([
-        ds.drop_vars([v for v in drop_vars if v in ds]),
-        sigma2_coords
-    ])
+    Parameters
+    ----------
+    ds : `xr.Dataset`
+
+    Returns
+    -------
+    ds : `xr.Dataset` containing target sigma2 coordinates
+    """
+    if not(any(c in ds.coords for c in ["sigma2_l", "sigma2_i"])):
+        # Set up target coordinates
+        dirname = os.path.dirname(__file__)
+        filename = os.path.join(dirname, "../data/sigma2_coords.nc")
+        sigma2_coords = xr.open_dataset(filename)
+        for c in sigma2_coords.dims:
+            sigma2_coords.coords[c].attrs = sigma2_coords.coords[c.replace("sigma2", "rho2")].attrs
+            sigma2_coords.coords[c].attrs["long_name"] = sigma2_coords.coords[c].attrs["long_name"].replace(
+                "Potential Density", "Potential Density minus 1000 kg/m3"
+            )
+            sigma2_coords.coords[c].attrs["cell_methods"] = f"{c}:point"
+        sigma2_coords.coords["sigma2_l"].attrs["edges"] = "sigma2_i"
+    
+        # Drop unnecessary or redundant variables
+        drop_vars = [
+            "obvfsq", "rsdo", "rsdoabsorb", "volcello", "volcello_bounds",
+            "uo", "vo", "uhml", "vhml"
+        ]
+        ds = xr.merge([
+            ds.drop_vars([v for v in drop_vars if v in ds]),
+            sigma2_coords
+        ])
 
     # Add attributes for sigma2
-    ds.sigma2.attrs = {
-        "long_name": "Potential Density referenced to 2000 dbar (minus 1000 kg/m3)",
-        "units": "kg m-3",
-        "cell_methods": "area:mean z_l:mean yh:mean xh:mean time:mean",
-        "volume": "volcello",
-        "area": "areacello",
-        "time_avg_info": "average_T1,average_T2,average_DT",
-        "description": "Computed offline using the gsw python package implementation of TEOS10.",
-    }
+    if "sigma2" in ds.data_vars:
+        ds.sigma2.attrs = {
+            "long_name": "Potential Density referenced to 2000 dbar (minus 1000 kg/m3)",
+            "units": "kg m-3",
+            "cell_methods": "area:mean z_l:mean yh:mean xh:mean time:mean",
+            "volume": "volcello",
+            "area": "areacello",
+            "time_avg_info": "average_T1,average_T2,average_DT",
+            "description": "Computed offline using the gsw python package implementation of TEOS10.",
+        }
     if "sigma2_bounds" in ds.data_vars:
         ds.sigma2_bounds.attrs = {
             "long_name": "Potential Density referenced to 2000 dbar (minus 1000 kg/m3)",
@@ -173,8 +237,15 @@ def add_sigma2_coords(ds):
     return ds
 
 def correct_cell_methods(ds):
+    """Correct cell methods for depth and wet mask coordinates.
+
+    Parameters
+    ----------
+    ds : `xr.Dataset`
+    """
     def correct_cell_method(v, cell_methods):
-        ds[v].attrs["cell_methods"] = cell_methods
+        if v in ds.coords:
+            ds[v].attrs["cell_methods"] = cell_methods
         
     correct_cell_method("wet", "xh:mean yh:mean time:point")
     correct_cell_method("wet_u", "xq:mean yh:point time:point")
@@ -182,13 +253,45 @@ def correct_cell_methods(ds):
     correct_cell_method("deptho", "xh:mean yh:mean time:point")
 
 def replace_by_dict(s, d):
+    """Apply multiple string replacements by looping through a dictionary"""
     for k,v in d.items():
         s = s.replace(k,v)
     return s
 
 def parse_cell_methods(s):
+    """Parse cell method string as dictionary
+
+    Parameters
+    ----------
+    s : cell method str
+        Must be formatted as a single string with dimensions
+        and their cell methods separated by `":"` and each pair
+        separated by a space `" "`.
+        Example: `"xh:mean yh:mean time:point"`
+
+    Returns
+    -------
+    d : dictionary mapping dimensions to their cell methods
+        Example: `{"xh":"mean", "yh":"mean", "time":"point"}`
+    """
     split_list = replace_by_dict(s, {" : ":":", ": ":":", " :":":"}).split(" ")
-    return {e.split(":")[0]:e.split(":")[1] for e in split_list}
+    d = {e.split(":")[0]:e.split(":")[1] for e in split_list}
+    return d
 
 def stringify_cell_methods_dict(d):
-    return replace_by_dict(str(d), {"'":"", ",":"", ": ":":", "{":"", "}":""})
+    """Turn cell method dictionary into str
+        Parameters
+    ----------
+    d : dictionary mapping dimensions to their cell methods
+        Example: `{"xh":"mean", "yh":"mean", "time":"point"}`
+
+    Returns
+    -------
+    s : cell method str
+        Must be formatted as a single string with dimensions
+        and their cell methods separated by `":"` and each pair
+        separated by a space `" "`.
+        Example: `"xh:mean yh:mean time:point"`
+    """
+    s = replace_by_dict(str(d), {"'":"", ",":"", ": ":":", "{":"", "}":""})
+    return s
