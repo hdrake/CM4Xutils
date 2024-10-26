@@ -16,10 +16,11 @@ exp_dict = {
             "c192_OM4_025_grid_No_mg_drag_v20160808_unpacked/"
             "ocean_hgrid.nc"
         ),
-        "piControl-spinup": "odiv-210",
-        "piControl"       : "odiv-230",
-        "historical"      : "odiv-231",
-        "ssp585"          : "odiv-232"
+        "piControl-spinup"   : "odiv-210",
+        "piControl"          : "odiv-230",
+        "piControl-continued": "odiv-306",
+        "historical"         : "odiv-231",
+        "ssp585"             : "odiv-232"
     },
     "CM4Xp125": {
         "hgrid": (
@@ -73,7 +74,7 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     if (time=="*") | (time=="000101*"):
         pdict_snap = get_wmt_pathDict(model, exp, "snapshot", time=time)
         snapshots = gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror).chunk(chunk_center)
-    
+
     # Case 2: we are only reading in a specific 5 yr interval,
     # in which case we also need the last snapshot from the prior interval.
     elif (time!="*") & (time!="000101*"):
@@ -82,6 +83,10 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
         if interval_preceeding in ["0096", "1845"]:
             pdict_snap_preceeding = get_wmt_pathDict(
                 model, "piControl-spinup", "snapshot", time=f"009601*"
+            )
+        elif (model == "CM4Xp25") and interval_preceeding in ["0356"]:
+            pdict_snap_preceeding = get_wmt_pathDict(
+                model, "piControl", "snapshot", time=f"035601*"
             )
         elif interval_preceeding=="2010":
             pdict_snap_preceeding = get_wmt_pathDict(
@@ -121,6 +126,7 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
         interval  = "2010"
         load_spin = False
         load_ctrl = True
+        load_ctrl_continued = False
         load_hist = True
         load_ssp5 = False
     elif interval=="all":
@@ -128,19 +134,24 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
         time_ctrl = "*"
         load_spin = True
         load_ctrl = True
+        load_ctrl_continued = True
         load_hist = True
         load_ssp5 = True
     elif interval.isnumeric():
         if (int(interval)%5)==0:
             time = f"{interval}01*"
-            time_ctrl = f"{str(int(interval)-1749).zfill(4)}01*"
+            interval_ctrl = str(int(interval)-1749)
+            time_ctrl = f"{interval_ctrl.zfill(4)}01*"
             load_spin = int(interval) < 1850
             load_ctrl = 1850 <= int(interval)
+            if model == "CM4Xp25":
+                load_ctrl = (1850 <= int(interval)) & (int(interval_ctrl) < 361)
+            load_ctrl_continued = (model == "CM4Xp25") & (int(interval_ctrl) >= 361)
             load_hist = (1850 <= int(interval)) & (int(interval) < 2015)
-            load_ssp5 = 2015 <= int(interval)
+            load_ssp5 = (2015 <= int(interval)) & (int(interval) < 2100)
         else:
             raise ValueError("interval must be an integer multiple of 5.")
-            
+
     # Load mass/heat/salt budget diagnostics align times
     if load_spin:
         print(f"Loading {model}-piControl-spinup for interval `{interval}`.")
@@ -157,6 +168,16 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
         ctrl = load_wmt_averages_and_snapshots(
             model,
             "piControl",
+            time=time_ctrl,
+            dmget=dmget,
+            mirror=mirror
+        )
+        
+    if load_ctrl_continued:
+        print(f"Loading {model}-piControl-continued for interval `{interval}`.")
+        ctrl_continued = load_wmt_averages_and_snapshots(
+            model,
+            "piControl-continued",
             time=time_ctrl,
             dmget=dmget,
             mirror=mirror
@@ -192,6 +213,12 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
     # The historical only branches off after the spin-up, we need to expand the
     # exp dimension of the spinup and specify it for both the control and forced.
 
+    if load_ctrl_continued:
+        if load_ctrl:
+            ctrl = concat_scenarios(ctrl, ctrl_continued)
+        else:
+            ctrl = ctrl_continued
+    
     # Case 1: We are only loading in intervals from the spinup
     if load_spin and not(load_ctrl):
         ds = xr.concat([
@@ -200,12 +227,15 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
         ], dim="exp", combine_attrs="override")
 
     # Case 2: We are loading in intervals from the control period (including forced runs)
-    elif load_ctrl:
-        ctrl, forc = align_dates(ctrl, forc)
-        ds = xr.concat([
-            forc.expand_dims({'exp': ["forced"]}),
-            ctrl.expand_dims({'exp': ["control"]})
-        ], dim="exp", combine_attrs="override")
+    elif load_ctrl | load_ctrl_continued:
+        if (load_hist) | (load_ssp5):
+            ctrl, forc = align_dates(ctrl, forc)
+            ds = xr.concat([
+                forc.expand_dims({'exp': ["forced"]}),
+                ctrl.expand_dims({'exp': ["control"]})
+            ], dim="exp", combine_attrs="override")
+        else:
+            ds = ctrl.expand_dims({'exp': ["control"]})
         
         if load_spin:
             spinup = xr.concat([
