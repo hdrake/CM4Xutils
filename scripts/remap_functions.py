@@ -27,9 +27,10 @@ def remap_budgets_to_sigma2_and_coarsen(model, start_year):
             dmget=True
         )
         ds = add_sigma2_coords(grid._ds)
+        vars_2d = [v for v in ds.data_vars if sorted(ds[v].dims) == ['exp', 'time', 'xh', 'yh']]
         ds_sigma2 = xr.merge([
             remap_vertical_coord("sigma2", ds, grid),
-            ds[["tos", "sos"]]
+            ds[vars_2d]
         ])
         grid_sigma2 = ds_to_grid(ds_sigma2)
 

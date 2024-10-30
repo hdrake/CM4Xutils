@@ -61,7 +61,9 @@ def add_grid_coords(ds, og):
         Must contain the following coordinates, which are standard in
         static files: ["areacello", "geolon", "geolat", "geolon_c",
         "geolat_c", "geolon_u", "geolat_u", "geolon_v", "geolat_v",
-        "dxCv", "dyCu", "deptho", "areacello", "wet", "wet_u", "wet_v"].
+        "deptho", "areacello", "wet", "wet_u", "wet_v"].
+
+        Should ideally contain ["dxCv", "dyCu"] as well, but optional.
 
     Returns
     -------
@@ -72,16 +74,18 @@ def add_grid_coords(ds, og):
         og['deptho'].where(~np.isnan(og['deptho']), 0.)
     )
 
-    ds = ds.assign_coords({
-        'dxCv': xr.DataArray(
-            og['dxCv'].transpose('xh', 'yq').values, dims=('xh', 'yq',),
-            attrs={**og.dxCv.attrs, **{"cell_methods": "xh:sum yq:point time:point"}},
-        ),
-        'dyCu': xr.DataArray(
-            og['dyCu'].transpose('xq', 'yh').values, dims=('xq', 'yh',),
-            attrs={**og.dyCu.attrs, **{"cell_methods": "xq:point yh:sum time:point"}},
-        )
-    }) # add velocity face widths to calculate distances along the section
+    if all([c in og for c in ["dxCv", "dyCu"]]):
+        # add velocity face widths to calculate distances along the section
+        ds = ds.assign_coords({
+            'dxCv': xr.DataArray(
+                og['dxCv'].transpose('xh', 'yq').values, dims=('xh', 'yq',),
+                attrs={**og.dxCv.attrs, **{"cell_methods": "xh:sum yq:point time:point"}},
+            ),
+            'dyCu': xr.DataArray(
+                og['dyCu'].transpose('xq', 'yh').values, dims=('xq', 'yh',),
+                attrs={**og.dyCu.attrs, **{"cell_methods": "xq:point yh:sum time:point"}},
+            )
+        })
     
     ds = ds.assign_coords({
         'areacello':xr.DataArray(og['areacello'].values, dims=("yh", "xh"), attrs=og.areacello.attrs),
@@ -96,9 +100,13 @@ def add_grid_coords(ds, og):
         'geolon_c': xr.DataArray(og['geolon_c'].values, dims=("yq", "xq",), attrs=og.geolon_c.attrs),
         'geolat_c': xr.DataArray(og['geolat_c'].values, dims=("yq", "xq",), attrs=og.geolat_c.attrs),
         'deptho':   xr.DataArray(og['deptho'].values, dims=("yh", "xh",), attrs=og.deptho.attrs),
-        'wet_v':     xr.DataArray(og['wet_v'].values, dims=("yq", "xh",), attrs=og.wet_v.attrs),
-        'wet_u':     xr.DataArray(og['wet_u'].values, dims=("yh", "xq",), attrs=og.wet_u.attrs),
-        'wet':     xr.DataArray(og['wet'].values, dims=("yh", "xh",), attrs=og.wet.attrs),
+        'wet':   xr.DataArray(og['wet'].values,   dims=("yh", "xh",), attrs=og.wet.attrs),
+        'wet_u': xr.DataArray(og['wet_u'].values, dims=("yh", "xq",), attrs=og.wet_u.attrs),
+        'wet_v': xr.DataArray(og['wet_v'].values, dims=("yq", "xh",), attrs=og.wet_v.attrs),
+        'xh': xr.DataArray(np.arange(og.xh.size), dims=("xh",), attrs=og.xh.attrs),
+        'yh': xr.DataArray(np.arange(og.yh.size), dims=("yh",), attrs=og.yh.attrs),
+        'xq': xr.DataArray(np.arange(og.xq.size), dims=("xq",), attrs=og.xq.attrs),
+        'yq': xr.DataArray(np.arange(og.yq.size), dims=("yq",), attrs=og.yq.attrs),
     })
     if ("thkcello" not in ds) and ("volcello" in ds) and ("areacello" in ds):
         ds['thkcello'] = ds['volcello']/ds['areacello']
@@ -244,12 +252,12 @@ def correct_cell_methods(ds):
     ds : `xr.Dataset`
     """
     def correct_cell_method(v, cell_methods):
-        if v in ds.coords:
+        if v in list(ds.data_vars)+list(ds.coords):
             ds[v].attrs["cell_methods"] = cell_methods
         
     correct_cell_method("wet", "xh:mean yh:mean time:point")
-    correct_cell_method("wet_u", "xq:mean yh:point time:point")
-    correct_cell_method("wet_v", "xh:point yq:mean time:point")
+    correct_cell_method("wet_u", "xq:point yh:mean time:point")
+    correct_cell_method("wet_v", "xh:mean yq:point time:point")
     correct_cell_method("deptho", "xh:mean yh:mean time:point")
 
 def replace_by_dict(s, d):

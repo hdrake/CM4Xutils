@@ -1,7 +1,7 @@
 from .grid_preprocess import *
 from .version import __version__
 
-def horizontally_coarsen(ds, grid, dim):
+def horizontally_coarsen(ds, grid, dim, skip_coords=False):
     """Horizontally coarsen a dataset by given coarsening factors.
 
     Grid-aware coarsening, which uses the `cell_methods` attributes
@@ -18,6 +18,7 @@ def horizontally_coarsen(ds, grid, dim):
         Currently requires coarsening factors to be divisors of
         the corresponding dimension.
         Example: `dim = {"X":2, "Y":2}`
+    skip_coords (bool) : Whether to skip subsampling of coordinates
 
     Returns
     -------
@@ -25,8 +26,13 @@ def horizontally_coarsen(ds, grid, dim):
     """
     ds_coarse = xr.Dataset(attrs=ds.attrs)
 
-    coord_vars = [e for e in ["areacello", "deptho", "wet"] if e in ds.coords]
-    for v in list(ds.data_vars) + coord_vars:
+    coarsen_key_coords = ["areacello", "deptho", "wet", "wet_u", "wet_v", "dxCv", "dyCu"]
+    coord_vars = [
+        e for e in coarsen_key_coords
+        if ((e in ds.coords) & (not skip_coords))
+    ]
+    var_list = list(ds.data_vars) + coord_vars
+    for v in var_list:
         
         da = ds[v]
 
@@ -34,7 +40,7 @@ def horizontally_coarsen(ds, grid, dim):
             print(f"Skipping variable {v} because `cell_methods` attribute not defined.")
             continue
             
-        cell_method = {k:v for (k,v) in parse_cell_methods(da.cell_methods).items()}
+        cell_method = parse_cell_methods(da.cell_methods)
         try:
             dim_names = {
                 "X": grid._get_dims_from_axis(da, "X")[0],
@@ -43,38 +49,92 @@ def horizontally_coarsen(ds, grid, dim):
         except:
             print(f"Skipping {v} because independent of 'X' and 'Y' dims.")
             continue
-
-        for (dim_name, dim_var) in dim_names.items():
-            if cell_method[dim_var] == "sum":
-                da = da.fillna(0.).coarsen(dim={dim_var:dim[dim_name]}).sum()
-                da = da.where(da!=0.)
-            elif cell_method[dim_var] == "point":
-                da = da.sel({dim_var: da[dim_var][::dim[dim_name]]})
-
+        
+        # First catch variables that are averaged in both X and Y
         if all([cell_method[dim_var] == "mean" for dim_var in dim_names.values()]):
+            # Should be the case for all area-averaged vertically-integrated cell tendencies
             A = grid.get_metric(da, ["X", "Y"])
-            attrs = da.attrs
-            Zcenter = grid.axes["Z"].coords["center"]
+            weight = A*ds.wet
+            if "Z" in grid.axes:
+                Zcenter = grid.axes["Z"].coords["center"]
+                if Zcenter in cell_method:
+                    if cell_method[Zcenter] == "mean":
+                        suffix = "_bounds" if "_bounds" in v else ""
+                        h = ds[f"thkcello{suffix}"]
+                        weight = A*h
+                        fillna = True
+                    else:
+                        fillna = False
+                    
             cdim = {dim_var:dim[dim_name] for (dim_name, dim_var) in dim_names.items()}
-            if Zcenter not in cell_method:
-                weight = A
-            elif cell_method[Zcenter] == "mean":
-                suffix = "_bounds" if "_bounds" in v else ""
-                h = ds[f"thkcello{suffix}"]
-                weight = A*h
-            else:
-                weight = A
-            da = (da*weight).fillna(0.).coarsen(dim=cdim).sum() / weight.fillna(0.).coarsen(dim=cdim).sum()
-            da = da.where(da!=0) if v not in coord_vars else da
+            attrs = da.attrs
+            da_weighted_integral = (da*weight).fillna(0.).coarsen(dim=cdim).sum()
+            weight_integral = weight.fillna(0.).coarsen(dim=cdim).sum()
+            da = da_weighted_integral / weight_integral
+            da = da.where(da!=0) if (v not in coord_vars) else da
             da.attrs = attrs
             
+        elif all([cell_method[dim_var] == "sum" for dim_var in dim_names.values()]):
+            # Only case should be grid cell area (`areacello`)
+            weight = ds.wet
+            cdim = {dim_var:dim[dim_name] for (dim_name, dim_var) in dim_names.items()}
+            attrs = da.attrs
+            da = (da*weight).fillna(0.).coarsen(dim=cdim).sum()
+            da = da.where(da!=0.) if (v not in coord_vars) else da
+            da.attrs = attrs
+            
+        else:
+            # First check if we need to take an average in one of the directions,
+            # because we need to use the cell widths at full resolution
+            if any([cell_method[dim_var] == "mean" for dim_var in dim_names.values()]):
+                for (dim_name, dim_var) in dim_names.items():
+                    if cell_method[dim_var] == "mean":
+                        # Come back to this
+                        if v in ["wet_u", "wet_v"]:
+                            da = da.coarsen(dim={dim_var:dim[dim_name]}).max()
+                        else:
+                            print(f"Skipping {v} because cell method is mean in {dim_var}.")
+                            continue
+
+            # Second check if we need to take a sum in either direction
+            elif any([cell_method[dim_var] == "sum" for dim_var in dim_names.values()]):
+                for (dim_name, dim_var) in dim_names.items():
+                    if cell_method[dim_var] == "sum":
+                        if dim_name == "X":
+                            weight = ds.wet_v
+                        elif dim_name == "Y":
+                            weight = ds.wet_u
+                        da = (da*weight).fillna(0.).coarsen(dim={dim_var:dim[dim_name]}).sum()
+                        da = da.where(da!=0.) if (v not in coord_vars) else da
+
+
+            # Finally, check if we need to do just simple subsampling
+            for (dim_name, dim_var) in dim_names.items():
+                if cell_method[dim_var] == "point":
+                    da = da.sel({dim_var: da[dim_var][::dim[dim_name]]})
+
         if v in ds.data_vars:
             ds_coarse[v] = da
             
         elif v in ds.coords:
             ds_coarse = ds_coarse.assign_coords({v: xr.DataArray(da.values, dims=da.dims)})
 
-    ds_coarse = subsample_geocoords(ds_coarse, ds, grid, dim)
+    for c in coord_vars:
+        ds_coarse[c].attrs = ds[c].attrs
+        if c == "areacello":
+            extra = (" (ignoring land cells when coarsening, so that tracer content "
+                     "can be accurately reconstructed by multiplying coarsened "
+                     "area-averaged tendencies by it)")
+            ds_coarse[c].attrs["long_name"] = ds_coarse[c].attrs["long_name"] + extra
+        elif c == "wet":
+            extra = " (can be between 0 and 1 if coarse cell includes wet and dry cells)"
+            ds_coarse[c].attrs["long_name"] = ds_coarse[c].attrs["long_name"] + extra
+        elif c in ["wet_u", "wet_v"]:
+            extra = " (can be between 0 and 1 if coarse face includes wet and dry faces)"
+            ds_coarse[c].attrs["long_name"] = ds_coarse[c].attrs["long_name"] + extra
+
+    if not(skip_coords):
+        ds_coarse = subsample_geocoords(ds_coarse, ds, grid, dim)
 
     coarsening_comment = f"""Diagnostics have been conservatively coarsened by Henri F. Drake
 (hfdrake@uci.edu) using the CM4Xutils python package v{__version__}
