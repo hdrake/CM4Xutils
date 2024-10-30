@@ -18,4 +18,6 @@ for start_year in np.arange(interval_start, interval_start+interval_length, 5):
     print(f"Processing tracers for {year_range}", end="\n")
 
     filename = f"../data/coarsened/{model}_{experiment}_tracers_sigma2_{year_range}.zarr"
-    remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year).to_zarr(filename, mode="w")
+    ds = remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year)
+    ds.attrs["version"] = "v0.1.0"
+    ds.to_zarr(filename, mode="w")

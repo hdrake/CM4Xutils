@@ -68,7 +68,7 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     """Load time-averaged water mass transformation budget diags and bounding snapshots"""
     pdict_tend = get_wmt_pathDict(model, exp, "tendency", time=time)
     pdict_surf = get_wmt_pathDict(model, exp, "surface" , time=time, add=["tos", "sos", "wfo", "evs"])
-    pdict_ice = get_wmt_pathDict(model, exp, "ice" , time=time, add=["siconc", "sithick", "LSNK", "EVAP", "SNOWFL", "RAIN"])
+    pdict_ice = get_wmt_pathDict(model, exp, "ice" , time=time, add=["siconc", "sithick", "LSNK", "LSRC", "EVAP", "SNOWFL", "RAIN"])
     av_tend = gu.open_frompp(**pdict_tend, dmget=dmget, mirror=mirror)
     av_surf = gu.open_frompp(**pdict_surf, dmget=dmget, mirror=mirror)
     
@@ -358,6 +358,8 @@ def load_density(odiv, time="*"):
     for (c,a) in attrs.items():
         ds.coords[c].attrs = a
 
+    correct_cell_methods(ds)
+
     ds.attrs["model"] = model
     ds.attrs["description"] = (
     f"""The {model} experimental design following Griffies et al.
@@ -383,6 +385,7 @@ def load_transient_tracers(odiv, time="*"):
         print(f"No transient tracers for {odiv}")
         ds_transient_tracers = xr.Dataset()
     ds_thickness = load_density(odiv, time=time)
+    ds_transient_tracers = ds_transient_tracers.assign_coords({k:ds_thickness[k] for k in ds_thickness.coords})
     ds = xr.merge([ds_transient_tracers, ds_thickness], compat="override")
 
     grid = ds_to_grid(ds, Zprefix="z")
@@ -396,10 +399,10 @@ def regrid_ice(ds, og, ig):
         if ds.xh_ice.size == 2*ds.xh.size:
             ds_ice = ds_ice.assign_coords({
                 "areacello": xr.DataArray(
-                    ig.CELL_AREA.values, dims=("yh", "xh"),
+                    ig.CELL_AREA.values, dims=("yh", "xh"), attrs=og.wet.attrs
                 ),
                 "wet": xr.DataArray(
-                    og.wet.values, dims=("yh", "xh"),
+                    og.wet.values, dims=("yh", "xh"), attrs=og.wet.attrs
                 ),
             })
             grid_ice = Grid(
@@ -477,7 +480,11 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
                     ds = ds.drop(v)
     
         # Regrid
+        print("Regridding ice")
         og = xr.open_dataset(gu.get_pathstatic(path_dict["pp"], "ocean_annual"))
+        og = add_grid_coords(og, og)
+        og = og.drop_vars(og.data_vars)
+        correct_cell_methods(og)
         ig = xr.open_dataset(gu.get_pathstatic(path_dict["pp"], "ice"))
         ds = regrid_ice(ds, og, ig)
     
