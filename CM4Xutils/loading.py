@@ -516,7 +516,12 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
     grid._ds["sigma2_bounds"] = wm_snapshots.get_density("sigma2")
 
     for (c,a) in c_attrs.items():
-        grid._ds.coords[c].attrs = a
+        if not hasattr(grid._ds.coords[c], 'attrs'):
+            grid._ds.coords[c].attrs = a
+        else:
+            for (k,v) in a:
+                if k not in grid._ds.coords[c].attrs:
+                    grid._ds.coords[c].attrs[k] = v
     
     return grid
 

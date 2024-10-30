@@ -192,18 +192,23 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
     for c in coord_vars:
         ds_coarse[c].attrs = ds[c].attrs
         if c == "areacello":
-            extra = (" [Note: We ignore land cells in partially wet cells when coarsening,"
-                     "so that tracer content can be accurately reconstructed "
-                     "by multiplying coarsened area-averaged tendencies by it."
-                     "Fully wet (`wet==1.0`) and fully dry (`wet==0.0`) should"
-                     "be unaffected.]")
-            ds_coarse[c].attrs["long_name"] = ds_coarse[c].attrs["long_name"] + extra
+            ds_coarse[c].attrs["note"] = (
+                "We ignore land cells in partially wet cells when coarsening,"
+                "so that tracer content can be accurately reconstructed "
+                "by multiplying coarsened area-averaged tendencies by it."
+                "Fully wet (`wet==1.0`) and fully dry (`wet==0.0`) should"
+                "be unaffected."
+            )
         elif c == "wet":
-            extra = " (can be between 0 and 1 if coarse cell includes both wet and dry sub-cells)"
-            ds_coarse[c].attrs["long_name"] = ds_coarse[c].attrs["long_name"] + extra
+            ds_coarse[c].attrs["note"] = (
+                "Can be between 0 and 1 if coarse cell includes both wet "
+                "and dry sub-cells)."
+            )
         elif c in ["wet_u", "wet_v"]:
-            extra = " (can be between 0 and 1 if coarse face includes both wet and dry sub-faces)"
-            ds_coarse[c].attrs["long_name"] = ds_coarse[c].attrs["long_name"] + extra
+            ds_coarse[c].attrs["note"] = (
+                "Can be between 0 and 1 if coarse face includes both wet "
+                "and dry sub-faces."
+            )
 
     if not(skip_coords):
         ds_coarse = subsample_geocoords(ds_coarse, ds, grid, dim)
