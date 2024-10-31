@@ -322,7 +322,8 @@ def load_density(odiv, time="*"):
         dmget=True
     )
     ds = ds.chunk({"time":1, "z_l":-1})
-    attrs = {c:ds.coords[c].attrs.copy() for c in ds.coords}
+    
+    c_attrs = {c:ds.coords[c].attrs.copy() for c in ds.coords}
 
     CM4X_z_i_levels = np.array([
         0.000e+00, 5.000e+00, 1.500e+01, 2.500e+01, 4.000e+01, 6.250e+01,
@@ -355,8 +356,13 @@ def load_density(odiv, time="*"):
     wm_averages = xwmt.WaterMass(xgcm.Grid(ds[["thetao", "so", "thkcello", "z_i"]], **wm_kwargs))
     ds["sigma2"] = wm_averages.get_density("sigma2")
 
-    for (c,a) in attrs.items():
-        ds.coords[c].attrs = a
+    for (c,a) in c_attrs.items():
+        if not hasattr(ds.coords[c], 'attrs'):
+            ds.coords[c].attrs = a
+        else:
+            for (k,v) in a.items():
+                if k not in ds.coords[c].attrs.keys():
+                    ds.coords[c].attrs[k] = v
 
     correct_cell_methods(ds)
 
@@ -519,8 +525,8 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
         if not hasattr(grid._ds.coords[c], 'attrs'):
             grid._ds.coords[c].attrs = a
         else:
-            for (k,v) in a:
-                if k not in grid._ds.coords[c].attrs:
+            for (k,v) in a.items():
+                if k not in grid._ds.coords[c].attrs.keys():
                     grid._ds.coords[c].attrs[k] = v
     
     return grid

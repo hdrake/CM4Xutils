@@ -189,6 +189,9 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
         elif v in ds.coords:
             ds_coarse = ds_coarse.assign_coords({v: xr.DataArray(da.values, dims=da.dims)})
 
+    if not(skip_coords):
+        ds_coarse = subsample_geocoords(ds_coarse, ds, grid, dim)
+
     for c in coord_vars:
         ds_coarse[c].attrs = ds[c].attrs
         if c == "areacello":
@@ -209,9 +212,6 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
                 "Can be between 0 and 1 if coarse face includes both wet "
                 "and dry sub-faces."
             )
-
-    if not(skip_coords):
-        ds_coarse = subsample_geocoords(ds_coarse, ds, grid, dim)
 
     coarsening_comment = f"""Diagnostics have been conservatively coarsened by Henri F. Drake
 (hfdrake@uci.edu) using the CM4Xutils python package v{__version__}
