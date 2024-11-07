@@ -26,10 +26,12 @@ def remap_budgets_to_sigma2_and_coarsen(model, start_year):
             interval=str(start_year),
             dmget=True
         )
+        
         ds = add_sigma2_coords(grid._ds)
+        vars_2d = [v for v in ds.data_vars if sorted(ds[v].dims) == ['exp', 'time', 'xh', 'yh']]
         ds_sigma2 = xr.merge([
             remap_vertical_coord("sigma2", ds, grid),
-            ds[["tos", "sos"]]
+            ds[vars_2d]
         ])
         grid_sigma2 = ds_to_grid(ds_sigma2)
 
@@ -39,10 +41,14 @@ def remap_budgets_to_sigma2_and_coarsen(model, start_year):
             grid_sigma2,
             dim = coarsen_dims[model]
         )
-        ds_sigma2_coarse = ds_sigma2_coarse.assign_coords({"sigma2_i": ds_sigma2.coords["sigma2_i"]})
-        
+        ds_sigma2_coarse = ds_sigma2_coarse.assign_coords(
+            {"sigma2_i": ds_sigma2.coords["sigma2_i"]}
+        )
 
-    ordered_dims = ['exp', 'time', 'time_bounds', 'sigma2_l', 'sigma2_i', 'yh', 'yq', 'xh', 'xq']
+    ordered_dims = [
+        'exp', 'time', 'time_bounds', 'sigma2_l', 'sigma2_i',
+        'yh', 'yq', 'xh', 'xq'
+    ]
     ds_sigma2_coarse = ds_sigma2_coarse.transpose(*ordered_dims)
 
     return ds_sigma2_coarse.chunk({d:-1 for d in ds_sigma2_coarse.dims})
@@ -70,7 +76,7 @@ def remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year):
         ds_sigma2 = remap_vertical_coord("sigma2", ds, grid)
         grid_sigma2 = ds_to_grid(ds_sigma2)
     
-    # Load ideal age (for CM4Xp125, only available at 2x2 coarsened grid)
+    # Load ideal age (for CM4Xp125, it is only available at 2x2 coarsened grid)
     age = load_tracer(odiv, "agessc", time=time)
     
     # Interpolate from annual-means to monthly-means (to match other transient tracers)
@@ -97,7 +103,7 @@ def remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year):
             })
     else:
         ds_age = ds
-        
+
     # Overwrite coordinates with corrected coordinates in main dataset for smooth merging
     age = age.assign_coords(ds_age.coords)
     

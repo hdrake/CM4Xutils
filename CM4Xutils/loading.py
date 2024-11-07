@@ -8,6 +8,7 @@ import gfdl_utils.core as gu
 import cftime
 
 from .grid_preprocess import *
+from .coarsen import *
 
 exp_dict = {
     "CM4Xp25": {
@@ -47,8 +48,10 @@ def get_wmt_pathDict(model, exp, category, time="*", add="*"):
         ppname = gu.find_unique_variable(pp, "opottemptend", require=[freq]+coarsen, ignore=ignore)
     elif category=="snapshot":
         ppname = gu.find_unique_variable(pp, "thetao", require=[freq]+["snap"]+coarsen, ignore=ignore)
+    elif category=="ice":
+        ppname = "ice"
     else:
-        raise ValueError("Valid categories are 'surface', 'tendency', and 'snapshot'.")
+        raise ValueError("Valid categories are 'surface', 'tendency', 'snapshot', and 'ice'.")
     local = gu.get_local(pp, ppname, "ts")
     return {
         "pp": pp,
@@ -64,10 +67,19 @@ chunk_center = {"time":1, "z_l":-1, "yh":-1, "xh":-1}
 def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=False):
     """Load time-averaged water mass transformation budget diags and bounding snapshots"""
     pdict_tend = get_wmt_pathDict(model, exp, "tendency", time=time)
-    pdict_surf = get_wmt_pathDict(model, exp, "surface" , time=time, add=["tos", "sos"])
+    pdict_surf = get_wmt_pathDict(model, exp, "surface" , time=time, add=["tos", "sos", "wfo", "evs"])
+    pdict_ice = get_wmt_pathDict(model, exp, "ice" , time=time, add=["siconc", "sithick", "LSNK", "LSRC", "EVAP", "SNOWFL", "RAIN"])
     av_tend = gu.open_frompp(**pdict_tend, dmget=dmget, mirror=mirror)
     av_surf = gu.open_frompp(**pdict_surf, dmget=dmget, mirror=mirror)
-    averages = xr.merge([av_tend, av_surf]).chunk(chunk)
+    
+    av_ice = gu.open_frompp(**pdict_ice, dmget=dmget, mirror=mirror)
+    av_ice = av_ice.drop_dims(
+        [d for d in av_ice.dims if d not in ["time", "yT", "xT"]]
+    )
+    av_ice = av_ice.rename({"xT":"xh_ice", "yT":"yh_ice"})
+    av_ice = av_ice.assign_coords({"time":av_tend.time})
+    
+    averages = xr.merge([av_tend, av_surf, av_ice]).chunk(chunk)
 
     # Case 1: We are either reading in all times or just the first 5-year interval.
     # In either case, there is no prior 5 yr interval, so we're missing the initial snapshot.
@@ -109,8 +121,9 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
         **{'time':'time_bounds'},
         **{v:f"{v}_bounds" for v in snapshots.data_vars}
     })
-    
-    return xr.merge([averages, snapshots])
+
+    ds_merged = xr.merge([averages, snapshots])
+    return ds_merged
 
 def load_wmt_grid(model, **kwargs):
     """Call `load_wmt_ds(model, **kwargs)` and build its corresponding `xgcm.Grid`."""
@@ -309,7 +322,8 @@ def load_density(odiv, time="*"):
         dmget=True
     )
     ds = ds.chunk({"time":1, "z_l":-1})
-    attrs = {c:ds.coords[c].attrs.copy() for c in ds.coords}
+    
+    c_attrs = {c:ds.coords[c].attrs.copy() for c in ds.coords}
 
     CM4X_z_i_levels = np.array([
         0.000e+00, 5.000e+00, 1.500e+01, 2.500e+01, 4.000e+01, 6.250e+01,
@@ -342,8 +356,15 @@ def load_density(odiv, time="*"):
     wm_averages = xwmt.WaterMass(xgcm.Grid(ds[["thetao", "so", "thkcello", "z_i"]], **wm_kwargs))
     ds["sigma2"] = wm_averages.get_density("sigma2")
 
-    for (c,a) in attrs.items():
-        ds.coords[c].attrs = a
+    for (c,a) in c_attrs.items():
+        if not hasattr(ds.coords[c], 'attrs'):
+            ds.coords[c].attrs = a
+        else:
+            for (k,v) in a.items():
+                if k not in ds.coords[c].attrs.keys():
+                    ds.coords[c].attrs[k] = v
+
+    correct_cell_methods(ds)
 
     ds.attrs["model"] = model
     ds.attrs["description"] = (
@@ -370,29 +391,126 @@ def load_transient_tracers(odiv, time="*"):
         print(f"No transient tracers for {odiv}")
         ds_transient_tracers = xr.Dataset()
     ds_thickness = load_density(odiv, time=time)
+    ds_transient_tracers = ds_transient_tracers.assign_coords({k:ds_thickness[k] for k in ds_thickness.coords})
     ds = xr.merge([ds_transient_tracers, ds_thickness], compat="override")
 
     grid = ds_to_grid(ds, Zprefix="z")
 
     return grid
 
+def regrid_ice(ds, og, ig):
+    if "xh_ice" in ds.coords:
+        ds_ice = ds.drop_dims(["xh", "yh"])
+        ds_ice = ds_ice.rename({"xh_ice":"xh", "yh_ice":"yh"})
+        if ds.xh_ice.size == 2*ds.xh.size:
+            ds_ice = ds_ice.assign_coords({
+                "areacello": xr.DataArray(
+                    ig.CELL_AREA.values, dims=("yh", "xh"), attrs=og.wet.attrs
+                ),
+                "wet": xr.DataArray(
+                    og.wet.values, dims=("yh", "xh"), attrs=og.wet.attrs
+                ),
+            })
+            grid_ice = Grid(
+                ds_ice,
+                coords={"X":{'center':'xh'},"Y": {'center':'yh'}},
+                metrics={('X','Y'): "areacello"},
+                boundary={"X":"periodic", "Y":"extend"},
+                autoparse_metadata=False
+            )
+            ds_ice = horizontally_coarsen(
+                ds_ice,
+                grid_ice,
+                {"X":2, "Y":2},
+                skip_coords=True
+            ).drop_vars(["areacello", "wet"])
+        ds = xr.merge([
+            ds.drop_dims(["xh_ice", "yh_ice"]),
+            ds_ice.assign_coords({"xh":ds.xh, "yh":ds.yh})
+        ])
+    return ds
+            
+
 def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
     """Make a comprehensive `xwmb`-compatible `xgcm.Grid` object."""
 
-    attrs = {c:ds.coords[c].attrs.copy() for c in ds.coords}
+    c_attrs = {
+        c:ds.coords[c].attrs.copy() for c in ds.coords
+        if c not in ["xh_ice", "yh_ice"]
+    }
 
     if overwrite_grid:
         path_dict = get_wmt_pathDict(ds.attrs["model"], "piControl", "surface")
-        og = xr.open_dataset(gu.get_pathstatic(path_dict["pp"], path_dict["ppname"]))
 
+        if ds.attrs["model"] == "CM4Xp125":
+            # Correct d2 coordinates by starting from full-resolution static file / supergrid
+            og = xr.open_dataset(gu.get_pathstatic(path_dict["pp"], "ocean_annual"))
+        else:
+            og = xr.open_dataset(gu.get_pathstatic(path_dict["pp"], path_dict["ppname"]))
+            
         if overwrite_supergrid:
             print(f"Overriding {ds.attrs["model"]} grid coordinates from supergrid.")
             sg = xr.open_dataset(exp_dict[ds.attrs["model"]]["hgrid"])
             og = fix_geo_coords(og, sg)
-    
+
+        # Correct d2 coordinates by manually coarsening full-resolution static file
+        if ds.attrs["model"] == "CM4Xp125":
+            og = add_grid_coords(og, og)
+            og = og.drop_vars(og.data_vars)
+            correct_cell_methods(og)
+            coords = {
+                "X": {'center':'xh', 'outer':'xq'},
+                "Y": {'center':'yh', 'outer':'yq'}
+            }
+            grid_full = Grid(
+                og,
+                coords=coords,
+                metrics={('X','Y'): "areacello"},
+                boundary={"X":"periodic", "Y":"extend"},
+                autoparse_metadata=False
+            )
+            og = horizontally_coarsen(
+                og,
+                grid_full,
+                {"X":2, "Y":2}
+            )
+
         ds = add_grid_coords(ds, og)
+
+        # Add cell_methods to variables if missing (e.g. for sea ice fields)
+        for v in [v for v in ds.data_vars if "xh_ice" in ds[v].dims]:
+            if "cell_methods" in ds[v].attrs:
+                if ds[v].ndim == 4:
+                    ds[v].attrs["cell_methods"] = 'area:mean yh:mean xh:mean time: mean'
+                else:
+                    ds = ds.drop(v)
+    
+        # Regrid
+        print("Regridding ice")
+        og = xr.open_dataset(gu.get_pathstatic(path_dict["pp"], "ocean_annual"))
+        og = add_grid_coords(og, og)
+        og = og.drop_vars(og.data_vars)
+        correct_cell_methods(og)
+        ig = xr.open_dataset(gu.get_pathstatic(path_dict["pp"], "ice"))
+        ds = regrid_ice(ds, og, ig)
+    
     grid = ds_to_grid(ds)
 
+    if "boundary_forcing_h_tendency" not in grid._ds:
+        with dask.config.set(**{'array.slicing.split_large_chunks': False}):
+            wm = xwmt.WaterMass(grid)
+            grid._ds["boundary_forcing_h_tendency"] = (
+                -grid.diff(wm.expand_surface_array_vertically(grid._ds["wfo"]), axis="Z") /
+                1035.
+            ).rename("boundary_forcing_h_tendency")
+            grid._ds["boundary_forcing_h_tendency"].attrs = {
+                'long_name': 'Cell thickness tendency due to boundary forcing',
+                'units': 'm s-1',
+                'cell_methods': 'area:mean z_l:sum yh:mean xh:mean time: mean',
+                'cell_measures': 'volume: volcello area: areacello',
+                'time_avg_info': 'average_T1,average_T2,average_DT'
+            }
+    
     # Compute potential density variables
     coords = {'Z': grid.axes['Z'].coords}
     wm_kwargs = {"coords": coords, "metrics":{}, "boundary":{"Z":"extend"}, "autoparse_metadata":False}
@@ -403,8 +521,13 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
     wm_snapshots = xwmt.WaterMass(xgcm.Grid(snapshot_state_vars.rename(rename_vardict), **wm_kwargs))
     grid._ds["sigma2_bounds"] = wm_snapshots.get_density("sigma2")
 
-    for (c,a) in attrs.items():
-        grid._ds.coords[c].attrs = a
+    for (c,a) in c_attrs.items():
+        if not hasattr(grid._ds.coords[c], 'attrs'):
+            grid._ds.coords[c].attrs = a
+        else:
+            for (k,v) in a.items():
+                if k not in grid._ds.coords[c].attrs.keys():
+                    grid._ds.coords[c].attrs[k] = v
     
     return grid
 
