@@ -67,7 +67,7 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
             #    recover the total cell area.
 
             # Case 1. Default to ocean surface area weights
-            A = grid.get_metric(da, ["X", "Y"]).fillna(0.)
+            A = grid.get_metric(da, ["X", "Y"]).fillna(0.) # ocean cell area
             weight = A.where(partially_wet_mask, 0.) # ensure that land area is masked
             # Case 3. Overwrite weight with total cell area when calculating wet mask
             if v == "wet":
@@ -79,8 +79,10 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
             elif "Z" in grid.axes:
                 Zcenter = grid.axes["Z"].coords["center"]
                 if Zcenter in cell_method:
-                    # Case 2. Overwrite weights with ocean volume
                     if cell_method[Zcenter] == "mean":
+                        # Case 2. Overwrite weights with ocean volume,
+                        # calculated by multiplying ocean area by
+                        # mean ocean thickness
                         suffix = "_bounds" if "_bounds" in v else ""
                         h = ds[f"thkcello{suffix}"]
                         weight = A*h
@@ -170,6 +172,7 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
                                 partially_wet_mask.astype("float"),
                                 0.
                             )
+                        attrs = da.attrs
                         da = (da*weight).fillna(0.).coarsen(dim=cdim).sum()
                         da = xr.where(
                             da == 0.,
@@ -177,6 +180,7 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
                             da
                         )
                         da = da if (v in coord_vars) else da.where(da!=0.)
+                        da.attrs = attrs
 
             # Finally, check if we need to do just simple subsampling
             for (dim_name, dim_var) in dim_names.items():
@@ -196,16 +200,18 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
         ds_coarse[c].attrs = ds[c].attrs
         if c == "areacello":
             ds_coarse[c].attrs["note"] = (
-                "We ignore land cells in partially wet cells when coarsening,"
+                "We ignore land cells in partially wet cells when coarsening, "
                 "so that tracer content can be accurately reconstructed "
-                "by multiplying coarsened area-averaged tendencies by it."
-                "Fully wet (`wet==1.0`) and fully dry (`wet==0.0`) should"
-                "be unaffected."
+                "by multiplying coarsened area-averaged tendencies by it. "
+                "Fully wet (`wet==1.0`) and fully dry (`wet==0.0`) cells "
+                "should be unaffected, and will just represent the total "
+                "cell area. For the partially wet cells, total cell area can "
+                "be derived from the ocean area by divding `areacello` by `wet`."
             )
         elif c == "wet":
             ds_coarse[c].attrs["note"] = (
                 "Can be between 0 and 1 if coarse cell includes both wet "
-                "and dry sub-cells)."
+                "and dry sub-cells."
             )
         elif c in ["wet_u", "wet_v"]:
             ds_coarse[c].attrs["note"] = (

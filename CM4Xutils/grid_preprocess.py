@@ -198,7 +198,7 @@ def add_sigma2_coords(ds):
     -------
     ds : `xr.Dataset` containing target sigma2 coordinates
     """
-    if not(any(c in ds.coords for c in ["sigma2_l", "sigma2_i"])):
+    if not(all(c in ds.coords for c in ["sigma2_l", "sigma2_i"])):
         # Set up target coordinates
         dirname = os.path.dirname(__file__)
         filename = os.path.join(dirname, "../data/sigma2_coords.nc")

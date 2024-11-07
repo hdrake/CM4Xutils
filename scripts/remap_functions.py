@@ -26,6 +26,7 @@ def remap_budgets_to_sigma2_and_coarsen(model, start_year):
             interval=str(start_year),
             dmget=True
         )
+        
         ds = add_sigma2_coords(grid._ds)
         vars_2d = [v for v in ds.data_vars if sorted(ds[v].dims) == ['exp', 'time', 'xh', 'yh']]
         ds_sigma2 = xr.merge([
@@ -40,9 +41,14 @@ def remap_budgets_to_sigma2_and_coarsen(model, start_year):
             grid_sigma2,
             dim = coarsen_dims[model]
         )
-        ds_sigma2_coarse = ds_sigma2_coarse.assign_coords({"sigma2_i": ds_sigma2.coords["sigma2_i"]})
+        ds_sigma2_coarse = ds_sigma2_coarse.assign_coords(
+            {"sigma2_i": ds_sigma2.coords["sigma2_i"]}
+        )
 
-    ordered_dims = ['exp', 'time', 'time_bounds', 'sigma2_l', 'sigma2_i', 'yh', 'yq', 'xh', 'xq']
+    ordered_dims = [
+        'exp', 'time', 'time_bounds', 'sigma2_l', 'sigma2_i',
+        'yh', 'yq', 'xh', 'xq'
+    ]
     ds_sigma2_coarse = ds_sigma2_coarse.transpose(*ordered_dims)
 
     return ds_sigma2_coarse.chunk({d:-1 for d in ds_sigma2_coarse.dims})
