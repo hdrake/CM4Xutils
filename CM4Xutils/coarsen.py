@@ -96,9 +96,6 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
                 da = da.round(5)
             da = da if (v in coord_vars) else da.where(da!=0.)
             da.attrs = attrs
-
-            #if v == "wet":
-            #    print(f"Number of intermediate values: {np.sum(np.abs(ds.wet.values - 0.5) < 0.45)}")
             
         elif all([cell_method[dim_var] == "sum" for dim_var in dim_names.values()]):
             # Only case should be grid cell area (`areacello`)

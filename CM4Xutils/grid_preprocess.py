@@ -213,7 +213,7 @@ def add_sigma2_coords(ds):
     
         # Drop unnecessary or redundant variables
         drop_vars = [
-            "obvfsq", "rsdo", "rsdoabsorb", "volcello", "volcello_bounds",
+            "obvfsq", "rsdo", "volcello", "volcello_bounds",
             "uo", "vo", "uhml", "vhml"
         ]
         ds = xr.merge([

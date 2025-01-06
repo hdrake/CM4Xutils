@@ -39,15 +39,16 @@ exp_dict = {
 def get_wmt_pathDict(model, exp, category, time="*", add="*"):
     """Retrieve dictionary of keyword arguments for `gfdl_utils.core.open_frompp`."""
     pp = doralite.dora_metadata(exp_dict[model][exp])['pathPP']
-    freq = "month"
+    freq = ["month"]
     ignore = ["1x1deg"]
     coarsen = ["d2"] if model=="CM4Xp125" else []
     if category=="surface":
-        ppname = gu.find_unique_variable(pp, "tos", require=[freq]+coarsen, ignore=ignore)
+        ignore_surf = ignore + coarsen if model=="CM4Xp125" else ignore
+        ppname = gu.find_unique_variable(pp, "tos", require=freq, ignore=ignore_surf)
     elif category=="tendency":
-        ppname = gu.find_unique_variable(pp, "opottemptend", require=[freq]+coarsen, ignore=ignore)
+        ppname = gu.find_unique_variable(pp, "opottemptend", require=freq+coarsen, ignore=ignore)
     elif category=="snapshot":
-        ppname = gu.find_unique_variable(pp, "thetao", require=[freq]+["snap"]+coarsen, ignore=ignore)
+        ppname = gu.find_unique_variable(pp, "thetao", require=freq+["snap"]+coarsen, ignore=ignore)
     elif category=="ice":
         ppname = "ice"
     else:
@@ -67,11 +68,44 @@ chunk_center = {"time":1, "z_l":-1, "yh":-1, "xh":-1}
 def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=False):
     """Load time-averaged water mass transformation budget diags and bounding snapshots"""
     pdict_tend = get_wmt_pathDict(model, exp, "tendency", time=time)
-    pdict_surf = get_wmt_pathDict(model, exp, "surface" , time=time, add=["tos", "sos", "wfo", "evs"])
-    pdict_ice = get_wmt_pathDict(model, exp, "ice" , time=time, add=["siconc", "sithick", "LSNK", "LSRC", "EVAP", "SNOWFL", "RAIN"])
     av_tend = gu.open_frompp(**pdict_tend, dmget=dmget, mirror=mirror)
+
+    state_vars = ["tos", "sos"]
+    mass_fluxes = ["wfo", "prlq", "prsn", "evs", "fsitherm", "friver", "ficeberg", "vprec"]
+    mome_fluxes = ["taux", "tauy"]
+    heat_fluxes = ["hflso", "hfsso", "rlntds", "rsdoabsorb", "heat_content_surfwater"]
+    salt_fluxes = ["sfdsi"]
+    surf_vars = state_vars + mass_fluxes + mome_fluxes + heat_fluxes + salt_fluxes
+    pdict_surf = get_wmt_pathDict(model, exp, "surface" , time=time, add=surf_vars)
     av_surf = gu.open_frompp(**pdict_surf, dmget=dmget, mirror=mirror)
+
+    # For CM4Xp125, surface fluxes are only available on native grid,
+    # but 3D tendencies only available on d2 coarsened grid,
+    # so we need to coarsen fluxes to d2.
+    if model == "CM4Xp125":
+        og = xr.open_dataset(gu.get_pathstatic(pdict_surf["pp"], pdict_surf["ppname"]))
+        correct_cell_methods(og)
+        av_surf = add_grid_coords(av_surf, og)
+        coords = {
+            "X": {'center':'xh', 'outer':'xq'},
+            "Y": {'center':'yh', 'outer':'yq'}
+        }
+        grid_tmp = Grid(
+            av_surf,
+            coords=coords,
+            metrics={('X','Y'): "areacello"},
+            boundary={"X":"periodic", "Y":"extend"},
+            autoparse_metadata=False
+        )
+        av_surf = horizontally_coarsen(
+            av_surf,
+            grid_tmp,
+            {"X":2, "Y":2}
+        )
+        av_surf = av_surf.assign_coords(av_tend.coords)
     
+    ice_vars = ["siconc", "sithick", "LSNK", "LSRC", "EVAP", "SNOWFL", "RAIN"]
+    pdict_ice = get_wmt_pathDict(model, exp, "ice" , time=time, add=ice_vars)
     av_ice = gu.open_frompp(**pdict_ice, dmget=dmget, mirror=mirror)
     av_ice = av_ice.drop_dims(
         [d for d in av_ice.dims if d not in ["time", "yT", "xT"]]
@@ -496,6 +530,13 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
     
     grid = ds_to_grid(ds)
 
+    # Correct fsitherm and prlq ocean flux diagnostics using RAIN ice diagnostic
+    if all([e in ds.data_vars for e in ["prlq", "RAIN"]]):
+        ds["fsitherm"].data = ds["prlq"].data - ds["RAIN"].data
+        if "fsitherm" in ds.data_vars:
+            ds["prlq"].data = ds["RAIN"].data
+
+    # Construct 3D h_tendency from wfo if it does not exist
     if "boundary_forcing_h_tendency" not in grid._ds:
         with dask.config.set(**{'array.slicing.split_large_chunks': False}):
             wm = xwmt.WaterMass(grid)
