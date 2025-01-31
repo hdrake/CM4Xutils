@@ -70,14 +70,52 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     pdict_tend = get_wmt_pathDict(model, exp, "tendency", time=time)
     av_tend = gu.open_frompp(**pdict_tend, dmget=dmget, mirror=mirror)
 
+    # Derive shortwave flux convergence from shortwave fluxes
+    if "rsdo" in av_tend.data_vars:
+        vgrid = Grid(
+            av_tend,
+            coords={"Z": {"center":"z_l", "outer":"z_i"}},
+            boundary={"Z":"extend"},
+            autoparse_metadata=False
+        )
+        av_tend["rsdoabsorb"] = -vgrid.diff(av_tend.rsdo.chunk({"z_i":-1}), "Z")
+        av_tend["rsdoabsorb"].attrs = {
+            'cell_measures': 'volume: volcello area: areacello',
+            'cell_methods': 'area:mean z_l:sum yh:mean xh:mean time:mean',
+            'long_name': 'Convergence of Penetrative Shortwave Flux in Sea Water Layer',
+            'standard_name': 'net_rate_of_absorption_of_shortwave_energy_in_ocean_layer',
+            'time_avg_info': 'average_T1,average_T2,average_DT',
+            'units': 'W m-2'
+        }
+    else:
+        print(f"Missing `rsdo` diagnostic for {model}-{exp}")
+    
     state_vars = ["tos", "sos"]
     mass_fluxes = ["wfo", "prlq", "prsn", "evs", "fsitherm", "friver", "ficeberg", "vprec"]
     mome_fluxes = ["taux", "tauy"]
-    heat_fluxes = ["hflso", "hfsso", "rlntds", "rsdoabsorb", "heat_content_surfwater"]
+    heat_fluxes = ["hflso", "hfsso", "rlntds", "heat_content_surfwater"]
     salt_fluxes = ["sfdsi"]
     surf_vars = state_vars + mass_fluxes + mome_fluxes + heat_fluxes + salt_fluxes
     pdict_surf = get_wmt_pathDict(model, exp, "surface" , time=time, add=surf_vars)
     av_surf = gu.open_frompp(**pdict_surf, dmget=dmget, mirror=mirror)
+
+    # Interpolate wind stress to tracer points for simplicity
+    hcoords = {
+        "X": {'center':'xh', 'outer':'xq'},
+        "Y": {'center':'yh', 'outer':'yq'}
+    }
+    hgrid = Grid(
+        av_surf,
+        coords=hcoords,
+        boundary={"X":"periodic", "Y":"extend"},
+        autoparse_metadata=False
+    )
+    if 'taux' in hgrid._ds.data_vars:
+        av_surf['taux'] = hgrid.interp(hgrid._ds['taux'].chunk({"xq":-1}), 'X', keep_attrs=True)
+        av_surf['taux'].attrs['cell_methods'] = 'yh:mean xh:mean time:mean'
+    if 'tauy' in hgrid._ds.data_vars:
+        av_surf['tauy'] = hgrid.interp(hgrid._ds['tauy'].chunk({"yq":-1}), 'Y', keep_attrs=True)
+        av_surf['tauy'].attrs['cell_methods'] = 'yh:mean xh:mean time:mean'
 
     # For CM4Xp125, surface fluxes are only available on native grid,
     # but 3D tendencies only available on d2 coarsened grid,

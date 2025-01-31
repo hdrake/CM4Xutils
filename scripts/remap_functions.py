@@ -27,13 +27,6 @@ def remap_budgets_to_sigma2_and_coarsen(model, start_year):
             dmget=True
         )
 
-        if 'taux' in grid._ds.data_vars:
-            grid._ds['taux'] = grid.interp(grid._ds['taux'], 'X', keep_attrs=True)
-            grid._ds['taux'].attrs['cell_methods'] = 'yh:mean xh:mean time:mean'
-        if 'tauy' in grid._ds.data_vars:
-            grid._ds['tauy'] = grid.interp(grid._ds['tauy'], 'Y', keep_attrs=True)
-            grid._ds['tauy'].attrs['cell_methods'] = 'yh:mean xh:mean time:mean'
-
         ds = add_sigma2_coords(grid._ds)
         vars_2d = [v for v in ds.data_vars if sorted(ds[v].dims) == ['exp', 'time', 'xh', 'yh']]
         ds_sigma2 = xr.merge([
