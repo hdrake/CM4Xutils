@@ -36,9 +36,40 @@ exp_dict = {
     }
 }
 
+pre_pp = "/archive/Raphael.Dussin/FMS2019.01.03_devgfdl_"
+pp_dict = {
+    "CM4Xp25": {
+        "hgrid": (
+            "/archive/Raphael.Dussin/datasets/OM4p25/"
+            "c192_OM4_025_grid_No_mg_drag_v20160808_unpacked/"
+            "ocean_hgrid.nc"
+        ),
+        "piControl-spinup"   : f"{pre_pp}20210706/CM4_piControl_c192_OM4p25_v7/gfdl.ncrc4-intel18-prod-openmp/pp",
+        "piControl"          : f"{pre_pp}20221223/CM4_piControl_c192_OM4p25_v8/gfdl.ncrc4-intel18-prod-openmp/pp",
+        "piControl-continued": f"{pre_pp}20241030/CM4_piControl_c192_OM4p125_v8followup/gfdl.ncrc5-intel22-prod-openmp/pp",
+        "historical"         : f"{pre_pp}20221223/CM4_historical_c192_OM4p25/gfdl.ncrc4-intel18-prod-openmp/pp",
+        "ssp585"             : f"{pre_pp}20221223/CM4_ssp585_c192_OM4p25/gfdl.ncrc4-intel18-prod-openmp/pp",
+    },
+    "CM4Xp125": {
+        "hgrid": (
+            "/archive/Raphael.Dussin/datasets/OM4p125"
+            "/mosaic_c192_om4p125_bedmachine_v20210310_hydrographyKDunne20210614_unpacked/"
+            "ocean_hgrid.nc"
+        ),
+        "piControl-spinup": f"{pre_pp}20210706/CM4_piControl_c192_OM4p125_v7/gfdl.ncrc4-intel18-prod-openmp/pp",
+        "piControl"       : f"{pre_pp}20230608/CM4_piControl_c192_OM4p125_v8/gfdl.ncrc5-intel22-prod-openmp/pp",
+        "historical"      : f"{pre_pp}20230608/CM4_historical_c192_OM4p125/gfdl.ncrc5-intel22-prod-openmp/pp",
+        "ssp585"          : f"{pre_pp}20230608/CM4_ssp585_c192_OM4p125/gfdl.ncrc5-intel22-prod-openmp/pp",
+    }
+}
+
 def get_wmt_pathDict(model, exp, category, time="*", add="*"):
     """Retrieve dictionary of keyword arguments for `gfdl_utils.core.open_frompp`."""
-    pp = doralite.dora_metadata(exp_dict[model][exp])['pathPP']
+    try:
+        pp = doralite.dora_metadata(exp_dict[model][exp])['pathPP']
+    except:
+        print("Dora seems to be down. Using hard-coded paths instead.")
+        pp = pp_dict[model][exp]
     freq = ["month"]
     ignore = ["1x1deg"]
     coarsen = ["d2"] if model=="CM4Xp125" else []
@@ -201,7 +232,27 @@ def load_wmt_grid(model, **kwargs):
     """Call `load_wmt_ds(model, **kwargs)` and build its corresponding `xgcm.Grid`."""
     ds = load_wmt_ds(model, **kwargs)
     grid = make_wmt_grid(ds)
+    expand_surface_fluxes(grid)
     return grid
+
+def expand_surface_fluxes(grid):
+    mass_fluxes = ["wfo", "prlq", "prsn", "evs", "fsitherm", "friver", "ficeberg", "vprec"]
+    heat_fluxes = ["hflso", "hfsso", "rlntds", "heat_content_surfwater"]
+    salt_fluxes = ["sfdsi"]
+    sice_fluxes = ["EVAP", "LSNK", "LSRC", "RAIN", "SNOWFL"]
+    surf_fluxes = mass_fluxes + heat_fluxes + salt_fluxes + sice_fluxes
+    
+    with dask.config.set(**{'array.slicing.split_large_chunks': False}):
+        wm = xwmt.WaterMass(grid)
+        for v in surf_fluxes:
+            attrs = grid._ds[v].attrs.copy()
+            grid._ds[v] = (
+                wm.expand_surface_array_vertically(grid._ds[v].fillna(0.), target_position="center")
+                .transpose("exp", "time", "z_l", "yh", "xh")
+            )
+            attrs["cell_methods"] = "area:mean z_l:sum yh:mean xh:mean time: mean"
+            attrs["long_name"] = f"Convergence of {attrs["long_name"]}"
+            grid._ds[v].attrs = attrs
 
 def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
     """Load a comprehensive CM4X dataset with all variables required to run `xwmb`."""
