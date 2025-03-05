@@ -46,7 +46,7 @@ pp_dict = {
         ),
         "piControl-spinup"   : f"{pre_pp}20210706/CM4_piControl_c192_OM4p25_v7/gfdl.ncrc4-intel18-prod-openmp/pp",
         "piControl"          : f"{pre_pp}20221223/CM4_piControl_c192_OM4p25_v8/gfdl.ncrc4-intel18-prod-openmp/pp",
-        "piControl-continued": f"{pre_pp}20241030/CM4_piControl_c192_OM4p125_v8followup/gfdl.ncrc5-intel22-prod-openmp/pp",
+        "piControl-continued": f"{pre_pp}20221223/CM4_piControl_c192_OM4p25_v8/gfdl.ncrc4-intel22-prod-openmp/pp",
         "historical"         : f"{pre_pp}20221223/CM4_historical_c192_OM4p25/gfdl.ncrc4-intel18-prod-openmp/pp",
         "ssp585"             : f"{pre_pp}20221223/CM4_ssp585_c192_OM4p25/gfdl.ncrc4-intel18-prod-openmp/pp",
     },
