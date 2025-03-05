@@ -58,7 +58,7 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
             # Weighted-average using either:
             # 1. ocean cell surface area, for variables with cell methods that are
             #    {X:mean, Y:mean} in 2D or additionally with {Z:sum} in 3D.
-            #    E.g. `tos` (surface ocean temperature) and heat budget tendencies
+            #    E.g. `tos` (surface ocean temperature), thkcello, and tracer budget tendencies
             # 2. ocean cell volume (surface area times instantaneous or time-mean thickness),
             #    for variables with 3D cell methods {X:mean, Y:mean, Z:mean}.
             #    E.g. tracers like `thetao`, `cfc11`, etc.

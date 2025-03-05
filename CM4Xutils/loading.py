@@ -29,10 +29,11 @@ exp_dict = {
             "/mosaic_c192_om4p125_bedmachine_v20210310_hydrographyKDunne20210614_unpacked/"
             "ocean_hgrid.nc"
         ),
-        "piControl-spinup": "odiv-209",
-        "piControl"       : "odiv-313",
-        "historical"      : "odiv-255",
-        "ssp585"          : "odiv-293",
+        "piControl-spinup"   : "odiv-209",
+        "piControl"          : "odiv-313",
+        "piControl-continued": "odiv-437",
+        "historical"         : "odiv-255",
+        "ssp585"             : "odiv-293",
     }
 }
 
@@ -56,10 +57,11 @@ pp_dict = {
             "/mosaic_c192_om4p125_bedmachine_v20210310_hydrographyKDunne20210614_unpacked/"
             "ocean_hgrid.nc"
         ),
-        "piControl-spinup": f"{pre_pp}20210706/CM4_piControl_c192_OM4p125_v7/gfdl.ncrc4-intel18-prod-openmp/pp",
-        "piControl"       : f"{pre_pp}20230608/CM4_piControl_c192_OM4p125_v8/gfdl.ncrc5-intel22-prod-openmp/pp",
-        "historical"      : f"{pre_pp}20230608/CM4_historical_c192_OM4p125/gfdl.ncrc5-intel22-prod-openmp/pp",
-        "ssp585"          : f"{pre_pp}20230608/CM4_ssp585_c192_OM4p125/gfdl.ncrc5-intel22-prod-openmp/pp",
+        "piControl-spinup"    : f"{pre_pp}20210706/CM4_piControl_c192_OM4p125_v7/gfdl.ncrc4-intel18-prod-openmp/pp",
+        "piControl"           : f"{pre_pp}20230608/CM4_piControl_c192_OM4p125_v8/gfdl.ncrc5-intel22-prod-openmp/pp",
+        "piControl-continued" : f"{pre_pp}20241030/CM4_piControl_c192_OM4p125_v8followup/gfdl.ncrc5-intel23-prod-openmp/pp",
+        "historical"          : f"{pre_pp}20230608/CM4_historical_c192_OM4p125/gfdl.ncrc5-intel22-prod-openmp/pp",
+        "ssp585"              : f"{pre_pp}20230608/CM4_ssp585_c192_OM4p125/gfdl.ncrc5-intel22-prod-openmp/pp",
     }
 }
 
@@ -280,9 +282,9 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
             time_ctrl = f"{interval_ctrl.zfill(4)}01*"
             load_spin = int(interval) < 1850
             load_ctrl = 1850 <= int(interval)
-            if model == "CM4Xp25":
-                load_ctrl = (1850 <= int(interval)) & (int(interval_ctrl) < 361)
-            load_ctrl_continued = (model == "CM4Xp25") & (int(interval_ctrl) >= 361)
+            continue_year = 361 if (model == "CM4Xp25") else 451
+            load_ctrl = (1850 <= int(interval)) & (int(interval_ctrl) < continue_year)
+            load_ctrl_continued = (int(interval_ctrl) >= continue_year)
             load_hist = (1850 <= int(interval)) & (int(interval) < 2015)
             load_ssp5 = (2015 <= int(interval)) & (int(interval) < 2100)
         else:
