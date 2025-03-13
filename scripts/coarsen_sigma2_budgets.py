@@ -17,5 +17,6 @@ for start_year in np.arange(interval_start, interval_start+interval_length, 5):
     
     filename = f"../data/coarsened/{model}_budgets_sigma2_{year_range}.zarr"
     ds = remap_budgets_to_sigma2_and_coarsen(model, start_year)
+    ds = ds.chunk({"time":1, "time_bounds":1})
     ds.attrs["version"] = "v0.3.0"
     ds.to_zarr(filename, mode="w")

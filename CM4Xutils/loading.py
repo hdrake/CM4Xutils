@@ -123,7 +123,7 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     else:
         print(f"Missing `rsdo` diagnostic for {model}-{exp}")
     
-    state_vars = ["tos", "sos"]
+    state_vars = ["tos", "sos", "ePBL_h_ML", "zos"]
     mass_fluxes = ["wfo", "prlq", "prsn", "evs", "fsitherm", "friver", "ficeberg", "vprec"]
     mome_fluxes = ["taux", "tauy"]
     heat_fluxes = ["hflso", "hfsso", "rlntds", "heat_content_surfwater"]
@@ -204,6 +204,10 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
         elif (model == "CM4Xp25") and interval_preceeding in ["0356"]:
             pdict_snap_preceeding = get_wmt_pathDict(
                 model, "piControl", "snapshot", time=f"035601*"
+            )
+        elif (model == "CM4Xp125") and interval_preceeding in ["0446"]:
+            pdict_snap_preceeding = get_wmt_pathDict(
+                model, "piControl", "snapshot", time=f"044601*"
             )
         elif interval_preceeding=="2010":
             pdict_snap_preceeding = get_wmt_pathDict(
@@ -479,6 +483,61 @@ def load_density(odiv, time="*"):
     coords = {'Z': {'center': 'z_l', 'outer': 'z_i'}}
     wm_kwargs = {"coords": coords, "metrics":{}, "boundary":{"Z":"extend"}, "autoparse_metadata":False}
     wm_averages = xwmt.WaterMass(xgcm.Grid(ds[["thetao", "so", "thkcello", "z_i"]], **wm_kwargs))
+    ds["sigma2"] = wm_averages.get_density("sigma2")
+
+    for (c,a) in c_attrs.items():
+        if not hasattr(ds.coords[c], 'attrs'):
+            ds.coords[c].attrs = a
+        else:
+            for (k,v) in a.items():
+                if k not in ds.coords[c].attrs.keys():
+                    ds.coords[c].attrs[k] = v
+
+    correct_cell_methods(ds)
+
+    ds.attrs["model"] = model
+    ds.attrs["description"] = (
+    f"""The {model} experimental design following Griffies et al.
+(to be submitted to JAMES around 09/2024).
+
+The `control` experiment type is a ocean-sea ice-atmosphere-land coupled
+climate model run with CO2 concentrations in the atmosphere
+prescribed at 280 ppm (preindustrial levels).
+
+The `forced` experiment type branches off from the preindustrial control
+in 1850 and is forced with historical CMIP6 forcings until 2014 and afterwards
+follows the SSP5-8.5 high-emissions forcing scenario."""
+    )
+    
+    return ds
+
+def load_density_annual(odiv, time="*"):
+    """Load a CM4X dataset of thermodynamics variables and derive sigma2."""
+    state_vars = ["thkcello", "thetao", "so", "rsdo"]
+    meta = doralite.dora_metadata(odiv)
+    pp = meta['pathPP']
+    ppname = "ocean_annual"
+    out = "ts"
+    local = gu.get_local(pp, ppname, out)
+    ds = gu.open_frompp(
+        pp, ppname, out, local, time, state_vars,
+        dmget=True
+    )
+    ds = ds.chunk({"time":1, "zl":-1, "zi":-1})
+    ds = ds.drop_vars(["rsdo"])
+    
+    c_attrs = {c:ds.coords[c].attrs.copy() for c in ds.coords}
+        
+    og = gu.open_static(pp, ppname)
+    model = [e for e,d in exp_dict.items() for k,v in d.items() if odiv==v][0]
+    sg = xr.open_dataset(exp_dict[model]["hgrid"])
+    og = fix_geo_coords(og, sg)
+    ds = add_grid_coords(ds, og)
+
+    # Compute potential density variables
+    coords = {'Z': {'center': 'zl', 'outer': 'zi'}}
+    wm_kwargs = {"coords": coords, "metrics":{}, "boundary":{"Z":"extend"}, "autoparse_metadata":False}
+    wm_averages = xwmt.WaterMass(xgcm.Grid(ds[["thetao", "so", "thkcello", "zi"]], **wm_kwargs))
     ds["sigma2"] = wm_averages.get_density("sigma2")
 
     for (c,a) in c_attrs.items():

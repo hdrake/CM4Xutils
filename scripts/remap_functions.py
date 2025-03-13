@@ -11,10 +11,10 @@ import gfdl_utils.core as gu
 from CM4Xutils import *
 
 def remap_budgets_to_sigma2_and_coarsen(model, start_year):
-    
+
     coarsen_dims = {
-        "CM4Xp25": {"X": 12, "Y": 12},
-        "CM4Xp125": {"X": 12, "Y": 10},
+        "CM4Xp25": {"X": 6, "Y": 6},
+        "CM4Xp125": {"X": 6, "Y": 5}, # Note: these are already on d2 grid
     }
     
     with warnings.catch_warnings():
@@ -51,7 +51,7 @@ def remap_budgets_to_sigma2_and_coarsen(model, start_year):
     ]
     ds_sigma2_coarse = ds_sigma2_coarse.transpose(*ordered_dims)
 
-    return ds_sigma2_coarse.chunk({d:-1 for d in ds_sigma2_coarse.dims})
+    return ds_sigma2_coarse.chunk({d:-1 for d in ds_sigma2_coarse.dims if "time" not in d})
 
 
 def remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year):
@@ -145,4 +145,4 @@ def remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year):
     ordered_dims = ['time', 'sigma2_l', 'sigma2_i', 'yh', 'yq', 'xh', 'xq']
     ds_sigma2_coarse = ds_sigma2_coarse.transpose(*ordered_dims)
 
-    return ds_sigma2_coarse.chunk({d:-1 for d in ds_sigma2_coarse.dims})
+    return ds_sigma2_coarse.chunk({d:-1 for d in ds_sigma2_coarse.dims if "time" not in d})
