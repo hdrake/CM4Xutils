@@ -160,11 +160,11 @@ def fillna_below(grid, da):
     
     # First last non-NaN vertical index
     da = da.where(da!=0)
-    idx = np.isnan(da).argmax()
+    zc = grid.axes['Z'].coords['center']
+    idx = np.isnan(da).argmax(zc)
     idx = xr.where(idx>0, idx-1, idx).compute()
 
     # Use bottom-most valid point to overwrite NaN points below
-    zc = grid.axes['Z'].coords['center']
     return xr.where(
         da[zc] > da[zc].isel({zc:idx}),
         da.isel({zc:idx}),
