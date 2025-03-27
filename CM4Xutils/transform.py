@@ -68,8 +68,9 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
             else:
                 da = ds[v]
 
+            target_coord = fillna_below(grid, ds[f"{coord}{suffix}"])
             zcoord_at_interface = (
-                grid.interp(ds[f"{coord}{suffix}"], "Z", boundary="extend").chunk({Z_i: -1})
+                grid.interp(target_coord, "Z", boundary="extend").chunk({Z_i: -1})
             )
             ds_trans[v] = transform_to_target_coord(da, zcoord_at_interface)
 
