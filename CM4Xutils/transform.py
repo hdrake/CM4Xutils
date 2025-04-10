@@ -137,7 +137,7 @@ def itp_tracer_to_transports(grid, tracer, transport_X, transport_Y):
             {xo:xr.DataArray(transport_X[xo][[0]], dims=(xo,))}
         ),
         tracer_right
-    ], dim=xo).assign_coords(transport_X.coords)
+    ], dim=xo).assign_coords(transport_X.coords).chunk({xo:-1})
 
     yc = grid.axes['Y'].coords['center']
     yo = grid.axes['Y'].coords['outer']
@@ -152,17 +152,28 @@ def itp_tracer_to_transports(grid, tracer, transport_X, transport_Y):
             {yo:xr.DataArray(transport_Y[yo][[0]], dims=(yo,))}
         ),
         tracer_right
-    ], dim=yo).assign_coords(transport_Y.coords)
+    ], dim=yo).assign_coords(transport_Y.coords).chunk({yo:-1})
 
     return tracer_X, tracer_Y
 
 def fillna_below(grid, da):
+    da = da.where(da!=0.)
     
+    grid_dims = [
+        grid.axes[d].coords[pos]
+        for d in grid.axes
+        for pos in ['outer', 'center']
+        if grid.axes[d].coords[pos] in da.dims
+    ]
+
     # First last non-NaN vertical index
-    da = da.where(da!=0)
     zc = grid.axes['Z'].coords['center']
-    idx = np.isnan(da).argmax(zc)
+    
+    da_slice = da.isel({k:0 for k in da.dims if k not in grid_dims})
+    idx = np.isnan(da_slice).argmax(zc)
+    idx = idx.where(np.isnan(da_slice).any(zc), da_slice[zc].size-1)
     idx = xr.where(idx>0, idx-1, idx).compute()
+    idx = idx.drop_vars([c for c in idx.coords if c not in idx.dims])
 
     # Use bottom-most valid point to overwrite NaN points below
     return xr.where(
