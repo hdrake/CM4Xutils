@@ -68,8 +68,9 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
             else:
                 da = ds[v]
 
+            target_coord = fillna_below(grid, ds[f"{coord}{suffix}"])
             zcoord_at_interface = (
-                grid.interp(ds[f"{coord}{suffix}"], "Z", boundary="extend").chunk({Z_i: -1})
+                grid.interp(target_coord, "Z", boundary="extend").chunk({Z_i: -1})
             )
             ds_trans[v] = transform_to_target_coord(da, zcoord_at_interface)
 
@@ -78,22 +79,35 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
                 h = ds_trans[f"thkcello{suffix}"].fillna(0.)
                 ds_trans[v] = (ds_trans[v]/h).where(ds_trans[v]!=0.)
 
-    if "umo" in ds.data_vars:
+    if all([v in ds.data_vars for v in ["umo", "vmo"]]):
+        coord_X, coord_Y = itp_tracer_to_transports(
+            grid,
+            ds[coord],
+            ds.umo,
+            ds.vmo
+        )
+        coord_X_filled = fillna_below(grid, coord_X)
+        coord_Y_filled = fillna_below(grid, coord_Y)
+        
         ds[f"{coord}_u"] = grid.interp(
-            grid.interp(ds[coord], "X"),
+            coord_X_filled,
             "Z",
             boundary="extend"
         ).chunk({Z_i: -1})
-        ds_trans["umo"] = transform_to_target_coord(ds.umo, ds[f"{coord}_u"])
+        ds_trans["umo"] = transform_to_target_coord(
+            ds.umo,
+            ds[f"{coord}_u"].where(ds[f"{coord}_u"])
+        )
 
-    if "vmo" in ds.data_vars:
         ds[f"{coord}_v"] = grid.interp(
-            grid.interp(ds[coord], "Y"),
+            coord_Y_filled,
             "Z",
             boundary="extend"
         ).chunk({Z_i: -1})
-        ds_trans["vmo"] = transform_to_target_coord(ds.vmo, ds[f"{coord}_v"])
-
+        ds_trans["vmo"] = transform_to_target_coord(
+            ds.vmo,
+            ds[f"{coord}_v"].where(ds[f"{coord}_v"])
+        )
 
     # Re-assign attributes
     for v in ds_trans.data_vars:
@@ -109,3 +123,61 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
     
     return ds_trans
 
+def itp_tracer_to_transports(grid, tracer, transport_X, transport_Y):
+    xc = grid.axes['X'].coords['center']
+    xo = grid.axes['X'].coords['outer']
+    tracer_right = tracer.rename({xc:xo}).assign_coords({xo:transport_X[xo][1:]})
+    tracer_right = xr.where(
+        np.logical_and(~np.isnan(tracer_right.roll({xo:-1})), ~np.isnan(tracer_right)),
+        0.5*sum([tracer_right.roll({xo:-1}), tracer_right]),
+        0.
+    )
+    tracer_X = xr.concat([
+        tracer_right.isel({xo:[-1]}).assign_coords(
+            {xo:xr.DataArray(transport_X[xo][[0]], dims=(xo,))}
+        ),
+        tracer_right
+    ], dim=xo).assign_coords(transport_X.coords).chunk({xo:-1})
+
+    yc = grid.axes['Y'].coords['center']
+    yo = grid.axes['Y'].coords['outer']
+    tracer_right = tracer.rename({yc:yo}).assign_coords({yo:transport_Y[yo][1:]})
+    tracer_right = xr.where(
+        np.logical_and(~np.isnan(tracer_right.roll({yo:-1})), ~np.isnan(tracer_right)),
+        0.5*sum([tracer_right.roll({yo:-1}), tracer_right]),
+        0.
+    )
+    tracer_Y = xr.concat([
+        tracer_right.isel({yo:[-1]}).assign_coords(
+            {yo:xr.DataArray(transport_Y[yo][[0]], dims=(yo,))}
+        ),
+        tracer_right
+    ], dim=yo).assign_coords(transport_Y.coords).chunk({yo:-1})
+
+    return tracer_X, tracer_Y
+
+def fillna_below(grid, da):
+    da = da.where(da!=0.)
+    
+    grid_dims = [
+        grid.axes[d].coords[pos]
+        for d in grid.axes
+        for pos in ['outer', 'center']
+        if grid.axes[d].coords[pos] in da.dims
+    ]
+
+    # First last non-NaN vertical index
+    zc = grid.axes['Z'].coords['center']
+    
+    da_slice = da.isel({k:0 for k in da.dims if k not in grid_dims})
+    idx = np.isnan(da_slice).argmax(zc)
+    idx = idx.where(np.isnan(da_slice).any(zc), da_slice[zc].size-1)
+    idx = xr.where(idx>0, idx-1, idx).compute()
+    idx = idx.drop_vars([c for c in idx.coords if c not in idx.dims])
+
+    # Use bottom-most valid point to overwrite NaN points below
+    return xr.where(
+        da[zc] > da[zc].isel({zc:idx}),
+        da.isel({zc:idx}),
+        da
+    )
