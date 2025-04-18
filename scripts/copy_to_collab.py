@@ -67,7 +67,7 @@ def call_gcp(source, destination):
                                 check=True, 
                                 capture_output=True, 
                                 text=True,
-                                timeout=600)
+                                timeout=1800)
         print("File copied successfully")
         return True
     except subprocess.CalledProcessError as e:
@@ -82,6 +82,8 @@ def copy_CM4Xp125_to_collab(ppname_list = None, dmget=True, gcp=True):
     """Copy CM4Xp125 diagnostics to collab Globus endpoint."""
     for k,odiv in CM4Xutils.exp_dict["CM4Xp125"].items():
         if k=="hgrid":
+            continue
+        if "continued" in k:
             continue
         
         pp = doralite.dora_metadata(odiv)["pathPP"]
@@ -103,6 +105,8 @@ def copy_CM4Xp125_to_collab(ppname_list = None, dmget=True, gcp=True):
             v_dict = v_list if ppname == "atmos" else {local: v_list}
             if ppname == "ocean_daily":
                 t = "034*" if "piControl" in k else "209*"
+                if ("spinup" in k) or ("continued" in k):
+                    continue
             elif "spinup" in k:
                 t = "00*"
             else:
