@@ -257,7 +257,7 @@ def expand_surface_fluxes(grid):
                 .transpose("exp", "time", "z_l", "yh", "xh")
             )
             attrs["cell_methods"] = "area:mean z_l:sum yh:mean xh:mean time: mean"
-            attrs["long_name"] = f"Convergence of {attrs["long_name"]}"
+            attrs["long_name"] = f"Convergence of {attrs['long_name']}"
             grid._ds[v].attrs = attrs
 
 def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
@@ -578,7 +578,7 @@ def load_transient_tracers(odiv, time="*"):
     ds_transient_tracers = ds_transient_tracers.assign_coords({k:ds_thickness[k] for k in ds_thickness.coords})
     ds = xr.merge([ds_transient_tracers, ds_thickness], compat="override")
 
-    grid = ds_to_grid(ds, Zprefix="z")
+    grid = ds_to_grid(ds, Zprefix="z_")
 
     return grid
 
