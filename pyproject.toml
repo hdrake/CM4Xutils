@@ -19,7 +19,7 @@ dependencies = [
     "nc-time-axis",
     "doralite @ git+https://github.com/hdrake/doralite.git@master",
     "gfdl_utils @ git+https://github.com/hdrake/gfdl_utils.git@master",
-    "xwmt @ git+https://github.com/hdrake/xwmt.git@main"
+    "xwmt >= 0.1.0"
 ]
 
 [project.urls]

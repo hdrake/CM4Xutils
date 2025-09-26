@@ -90,7 +90,8 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
             cdim = {dim_var:dim[dim_name] for (dim_name, dim_var) in dim_names.items()}
             attrs = da.attrs
             da_weighted_integral = (da*weight).fillna(0.).coarsen(dim=cdim).sum()
-            weight_integral = weight.fillna(0.).coarsen(dim=cdim).sum()
+            da_mask = np.logical_not(np.isnan(da))
+            weight_integral = (weight.where(da_mask)).fillna(0.).coarsen(dim=cdim).sum()
             da = (da_weighted_integral / weight_integral).fillna(0.)
             if v == "wet":
                 da = da.round(5)

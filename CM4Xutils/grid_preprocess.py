@@ -139,10 +139,11 @@ def ds_to_grid(ds, Zprefix=None):
               if v in ds},
     }
     if Zprefix is not None:
-        coords = {
-            **coords,
-            **{'Z': {'center': f'{Zprefix}_l', 'outer': f'{Zprefix}_i'}}
-        }
+        if "z" in Zprefix:
+            coords = {
+                **coords,
+                **{'Z': {'center': f'{Zprefix}l', 'outer': f'{Zprefix}i'}}
+            }
     else:
         print("Inferring Z grid coordinate: ", end="")
         if "sigma2_l" in ds.dims:

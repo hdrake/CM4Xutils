@@ -109,7 +109,7 @@ def remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year):
     
     # Add age to other variables--need the coordinates of `ds_age.agessc` to match with those of `ds_d2`!
     ds_age["agessc"] = age.agessc
-    grid_age = ds_to_grid(ds_age, Zprefix="z")
+    grid_age = ds_to_grid(ds_age, Zprefix="z_")
     
     # Transform to density coordinates
     with warnings.catch_warnings():
