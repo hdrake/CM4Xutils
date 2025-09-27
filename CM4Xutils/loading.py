@@ -705,9 +705,15 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
     # Compute potential density variables
     coords = {'Z': grid.axes['Z'].coords}
     wm_kwargs = {"coords": coords, "metrics":{}, "boundary":{"Z":"extend"}, "autoparse_metadata":False}
-    wm_averages = xwmt.WaterMass(xgcm.Grid(grid._ds[["thetao", "so", "thkcello", coords["Z"]["outer"]]], **wm_kwargs))
+    wm_averages = xwmt.WaterMass(
+        xgcm.Grid(grid._ds[["thetao", "so", "thkcello", coords["Z"]["outer"]]], **wm_kwargs)
+    )
     grid._ds["sigma2"] = wm_averages.get_density("sigma2")
-    snapshot_state_vars = grid._ds[["thetao_bounds", "so_bounds", "thkcello_bounds", coords["Z"]["outer"]]]
+    snapshot_state_vars = grid._ds[[
+        "thetao_bounds", "so_bounds",
+        "thkcello_bounds",
+        coords["Z"]["outer"]]
+    ]
     rename_vardict = {v:v.split("_")[0] for v in snapshot_state_vars.data_vars}
     wm_snapshots = xwmt.WaterMass(xgcm.Grid(snapshot_state_vars.rename(rename_vardict), **wm_kwargs))
     grid._ds["sigma2_bounds"] = wm_snapshots.get_density("sigma2")

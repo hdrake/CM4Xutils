@@ -51,7 +51,7 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
             print(f"Skipping {v} because independent of 'X' and 'Y' dims.")
             continue
 
-        partially_wet_mask = ds.wet.fillna(0.) > 0.
+        partially_wet_mask = (ds.wet.fillna(0.) > 0.).compute()
 
         # First catch variables that are averaged in both X and Y
         if all([cell_method[dim_var] == "mean" for dim_var in dim_names.values()]):
@@ -67,31 +67,36 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
             #    recover the total cell area.
 
             # Case 1. Default to ocean surface area weights
-            A = grid.get_metric(da, ["X", "Y"]).fillna(0.) # ocean cell area
-            weight = A.where(partially_wet_mask, 0.) # ensure that land area is masked
+            A = grid.get_metric(da, ["X", "Y"]).fillna(0.).compute() # ocean cell area
+            weight = A.where(partially_wet_mask, 0.).compute() # ensure that land area is masked
             # Case 3. Overwrite weight with total cell area when calculating wet mask
             if v == "wet":
                 weight = xr.where(
                     partially_wet_mask,
                     A/ds.wet.fillna(0.), # convert ocean area to total cell area
                     A
-                ).fillna(0.)
+                ).fillna(0.).compute()
             elif "Z" in grid.axes:
                 Zcenter = grid.axes["Z"].coords["center"]
                 if Zcenter in cell_method:
                     if cell_method[Zcenter] == "mean":
                         # Case 2. Overwrite weights with ocean volume,
-                        # calculated by multiplying ocean area by
-                        # mean ocean thickness
+                        # calculated by multiplying ocean cell area by
+                        # mean ocean cell thickness
                         suffix = "_bounds" if "_bounds" in v else ""
-                        h = ds[f"thkcello{suffix}"]
-                        weight = A*h
+                        if f"volcello{suffix}" in ds:
+                            weight = ds[f"volcello{suffix}"]
+                        else:
+                            h = ds[f"thkcello{suffix}"]
+                            weight = A*h
                     
             cdim = {dim_var:dim[dim_name] for (dim_name, dim_var) in dim_names.items()}
             attrs = da.attrs
             da_weighted_integral = (da*weight).fillna(0.).coarsen(dim=cdim).sum()
             da_mask = np.logical_not(np.isnan(da))
             weight_integral = (weight.where(da_mask)).fillna(0.).coarsen(dim=cdim).sum()
+            da_coords = {c:da_weighted_integral[c] for c in da_weighted_integral.coords}
+            weight_integral = weight_integral.assign_coords(da_coords)
             da = (da_weighted_integral / weight_integral).fillna(0.)
             if v == "wet":
                 da = da.round(5)
