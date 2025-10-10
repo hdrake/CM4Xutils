@@ -80,12 +80,16 @@ def get_wmt_pathDict(model, exp, category, time="*", add="*"):
         ppname = gu.find_unique_variable(pp, "tos", require=freq, ignore=ignore_surf)
     elif category=="tendency":
         ppname = gu.find_unique_variable(pp, "opottemptend", require=freq+coarsen, ignore=ignore)
+    elif category=="native":
+        ignore_list = ignore+coarsen+["snap"]+["rho2"]
+        ppname = gu.find_unique_variable(pp, "thkcello", require=freq, ignore=ignore_list)
+        add = "thkcello"
     elif category=="snapshot":
         ppname = gu.find_unique_variable(pp, "thetao", require=freq+["snap"]+coarsen, ignore=ignore)
     elif category=="ice":
         ppname = "ice"
     else:
-        raise ValueError("Valid categories are 'surface', 'tendency', 'snapshot', and 'ice'.")
+        raise ValueError("Valid categories are 'surface', tendency', 'native', 'snapshot', and 'ice'.")
     local = gu.get_local(pp, ppname, "ts")
     return {
         "pp": pp,
@@ -100,6 +104,8 @@ chunk = {"time":1, "z_l":-1, "yh":-1, "xh":-1, "yq":-1, "xq":-1}
 chunk_center = {"time":1, "z_l":-1, "yh":-1, "xh":-1}
 def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=False):
     """Load time-averaged water mass transformation budget diags and bounding snapshots"""
+    
+    # Get time-averaged heat and salt budget tendencies
     pdict_tend = get_wmt_pathDict(model, exp, "tendency", time=time)
     av_tend = gu.open_frompp(**pdict_tend, dmget=dmget, mirror=mirror)
 
@@ -225,6 +231,8 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
             ],
             dim="time"
         )
+
+    # Fix
 
     snapshots = snapshots.rename({
         **{'time':'time_bounds'},
@@ -660,6 +668,45 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
             )
 
         ds = add_grid_coords(ds, og)
+
+        if ds.attrs["model"] == "CM4Xp125":
+            # Compute 3D wet_mask needed to correct budget diagnostics
+            pdict_native = get_wmt_pathDict(ds.attrs["model"], "historical", "native", time="1850*")
+            ds_native = gu.open_frompp(**pdict_native, dmget=True)
+            og_native = gu.open_static(pdict_native["pp"], pdict_native["ppname"])
+            ds_native = add_grid_coords(ds_native, og_native)
+            
+            native_wet_mask = (ds_native['thkcello'].isel(time=0).fillna(0.)!=0.)
+            native_wet_mask.attrs["cell_methods"] = "xh:mean yh:mean z_l:sum"
+    
+            grid_native = Grid(
+                ds_native,
+                coords={"X":{"center":"xh", "outer":"xq"}, "Y":{"center":"yh", "outer":"yq"}},
+                boundary={"X":"periodic", "Y":"extend"},
+                metrics={('X', 'Y'):['areacello']},
+                autoparse_metadata=False
+            )
+
+            ds_coarsened_wet_mask = horizontally_coarsen(
+                xr.Dataset({'wet_mask': native_wet_mask}).assign_coords(ds_native.coords),
+                grid_native,
+                dim={"X":2, "Y":2}
+            ).fillna(0.)
+
+            # Overwrite d2 coarsened areacello and wet to match my conventions
+            ds["areacello"] = ds["areacello"].where(False, ds_coarsened_wet_mask.areacello.values)
+            ds["wet"] = ds["wet"].where(False, ds_coarsened_wet_mask.wet.values)
+            
+            ds_coarsened_wet_mask = ds_coarsened_wet_mask.assign_coords(ds.coords)
+
+            mms_cell_methods = ["xh:mean", "yh:mean", "z_l:sum"]
+            for k,v in ds.data_vars.items():
+                if "cell_methods" in v.attrs:
+                    if all([d in v.attrs["cell_methods"] for d in mms_cell_methods]):
+                        ds[k] = xr.DataArray(
+                            ds[k] * ds_coarsened_wet_mask.wet_mask,
+                            attrs = ds[k].attrs
+                        )
 
         # Add cell_methods to variables if missing (e.g. for sea ice fields)
         for v in [v for v in ds.data_vars if "xh_ice" in ds[v].dims]:

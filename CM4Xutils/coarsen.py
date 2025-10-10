@@ -52,6 +52,7 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
             continue
 
         partially_wet_mask = (ds.wet.fillna(0.) > 0.).compute()
+        wet_pos = ds.wet.where(ds.wet > 0.).compute()
 
         # First catch variables that are averaged in both X and Y
         if all([cell_method[dim_var] == "mean" for dim_var in dim_names.values()]):
@@ -71,9 +72,10 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
             weight = A.where(partially_wet_mask, 0.).compute() # ensure that land area is masked
             # Case 3. Overwrite weight with total cell area when calculating wet mask
             if v == "wet":
+                # convert ocean area to total cell area
                 weight = xr.where(
                     partially_wet_mask,
-                    A/ds.wet.fillna(0.), # convert ocean area to total cell area
+                    A/wet_pos,
                     A
                 ).fillna(0.).compute()
             elif "Z" in grid.axes:
@@ -97,7 +99,7 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
             weight_integral = (weight.where(da_mask)).fillna(0.).coarsen(dim=cdim).sum()
             da_coords = {c:da_weighted_integral[c] for c in da_weighted_integral.coords}
             weight_integral = weight_integral.assign_coords(da_coords)
-            da = (da_weighted_integral / weight_integral).fillna(0.)
+            da = da_weighted_integral / weight_integral.where(weight_integral != 0.)
             if v == "wet":
                 da = da.round(5)
             da = da if (v in coord_vars) else da.where(da!=0.)
@@ -130,27 +132,27 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
                     if cell_method[dim_var] == "mean":
                         if v == "wet_u":
                             attrs = da.attrs
-                            partially_wet_mask = ds.wet_u.fillna(0.) > 0.
+                            partially_wet_u_mask = ds.wet_u.fillna(0.) > 0.
                             weight = xr.where(
-                                partially_wet_mask,
-                                (ds.dyCu.fillna(0.)/ds.wet_u.fillna(0.)).fillna(0.),
-                                ds.dyCu.fillna(0.)
-                            )
+                                partially_wet_u_mask,
+                                ds.dyCu.fillna(0.)/ds.wet_u.where(ds.wet_u > 0),
+                                ds.dyCu
+                            ).fillna(0.)
                             da_weighted_integral = (da*weight).fillna(0.).coarsen(dim=cdim).sum()
                             weight_integral = weight.fillna(0.).coarsen(dim=cdim).sum()
-                            da = (da_weighted_integral / weight_integral).fillna(0.).round(5)
+                            da = (da_weighted_integral / weight_integral.where(weight_integral != 0.)).round(5)
                             da.attrs = attrs
                         elif v == "wet_v":
                             attrs = da.attrs
-                            partially_wet_mask = ds.wet_v.fillna(0.) > 0.
+                            partially_wet_v_mask = ds.wet_v.fillna(0.) > 0.
                             weight = xr.where(
-                                partially_wet_mask,
-                                (ds.dxCv.fillna(0.)/ds.wet_v.fillna(0.)).fillna(0.),
-                                ds.dxCv.fillna(0.)
-                            )
+                                partially_wet_v_mask,
+                                ds.dxCv.fillna(0.)/ds.wet_v.where(ds.wet_v > 0),
+                                ds.dxCv
+                            ).fillna(0.)
                             da_weighted_integral = (da*weight).fillna(0.).coarsen(dim=cdim).sum()
                             weight_integral = weight.fillna(0.).coarsen(dim=cdim).sum()
-                            da = (da_weighted_integral / weight_integral).fillna(0.).round(5)
+                            da = (da_weighted_integral / weight_integral.where(weight_integral != 0.)).round(5)
                             da.attrs = attrs
                         else:
                             print(f"Skipping {v} because cell method is mean in {dim_var}.")
