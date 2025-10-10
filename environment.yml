@@ -1,0 +1,8 @@
+name: CM4Xutils
+channels:
+  - conda-forge
+dependencies:
+  - python==3.11
+  - jupyterlab
+  - matplotlib
+  - pip

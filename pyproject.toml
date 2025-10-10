@@ -17,9 +17,10 @@ dependencies = [
     "xgcm",
     "cftime",
     "nc-time-axis",
+    "xwmt >= 0.1.0",
     "doralite @ git+https://github.com/hdrake/doralite.git@master",
+    "intake-esm",
     "gfdl_utils @ git+https://github.com/hdrake/gfdl_utils.git@master",
-    "xwmt >= 0.1.0"
 ]
 
 [project.urls]
