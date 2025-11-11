@@ -18,6 +18,6 @@ for start_year in np.arange(interval_start, interval_start+interval_length, 5):
     filename = f"../data/coarsened/{model}_budgets_sigma2_{year_range}.zarr"
     ds = remap_budgets_to_sigma2_and_coarsen(model, start_year)
     ds = ds.chunk({"time":1, "time_bounds":1})
-    ds.attrs["version"] = "v0.5.0"
-    ds.attrs["version_notes"] = """Between v0.4.0 and v0.5.0, CM4Xutils has been upgraded to v0.8.0. The main change is that the sigma2 levels were extended so that extremely dense water masses are now included in the target coordinate grid! This ensures global mass and energy conservation."""
+    ds.attrs["version"] = "v1.0.0"
+    ds.attrs["version_notes"] = """Between v0.5.0 and v1.0.0, CM4Xutils has been upgraded to major release v1.0.0."""
     ds.to_zarr(filename, mode="w")
