@@ -68,7 +68,7 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
             else:
                 da = ds[v]
 
-            target_coord = fillna_below(grid, ds[f"{coord}{suffix}"])
+            target_coord = ds[f"{coord}{suffix}"].ffill(dim=Z_l, limit=None)
             zcoord_at_interface = (
                 grid.interp(target_coord, "Z", boundary="extend").chunk({Z_i: -1})
             )
@@ -86,8 +86,8 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
             ds.umo,
             ds.vmo
         )
-        coord_X_filled = fillna_below(grid, coord_X)
-        coord_Y_filled = fillna_below(grid, coord_Y)
+        coord_X_filled = coord_X.ffill(dim=Z_l, limit=None)
+        coord_Y_filled = coord_Y.ffill(dim=Z_l, limit=None)
         
         ds[f"{coord}_u"] = grid.interp(
             coord_X_filled,
@@ -155,29 +155,3 @@ def itp_tracer_to_transports(grid, tracer, transport_X, transport_Y):
     ], dim=yo).assign_coords(transport_Y.coords).chunk({yo:-1})
 
     return tracer_X, tracer_Y
-
-def fillna_below(grid, da):
-    da = da.where(da!=0.)
-    
-    grid_dims = [
-        grid.axes[d].coords[pos]
-        for d in grid.axes
-        for pos in ['outer', 'center']
-        if grid.axes[d].coords[pos] in da.dims
-    ]
-
-    # First last non-NaN vertical index
-    zc = grid.axes['Z'].coords['center']
-    
-    da_slice = da.isel({k:0 for k in da.dims if k not in grid_dims})
-    idx = np.isnan(da_slice).argmax(zc)
-    idx = idx.where(np.isnan(da_slice).any(zc), da_slice[zc].size-1)
-    idx = xr.where(idx>0, idx-1, idx).compute()
-    idx = idx.drop_vars([c for c in idx.coords if c not in idx.dims])
-
-    # Use bottom-most valid point to overwrite NaN points below
-    return xr.where(
-        da[zc] > da[zc].isel({zc:idx}),
-        da.isel({zc:idx}),
-        da
-    )
