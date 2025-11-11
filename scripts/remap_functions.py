@@ -81,7 +81,7 @@ def remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year):
     
     # Interpolate from annual-means to monthly-means (to match other transient tracers)
     interp_kwargs = {"fill_value": "extrapolate"}
-    age = age.interp(time=ds.time, kwargs=interp_kwargs).chunk({"time":1})
+    age = age.interp(time=ds.time, kwargs=interp_kwargs).chunk({"time":1, "z_l":-1})
     age["average_DT"] = ds.average_DT
     
     # Zero-out negative ages (due to extrapolation of time interpolation in first few months)
@@ -115,7 +115,7 @@ def remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year):
     with warnings.catch_warnings():
         warnings.simplefilter(action='ignore', category=FutureWarning)
     
-        ds_age_sigma2 = remap_vertical_coord("sigma2", ds_age, grid_age)
+        ds_age_sigma2 = remap_vertical_coord("sigma2", ds_age.chunk({"z_l":-1}), grid_age)
         grid_age_sigma2 = ds_to_grid(ds_age_sigma2)
 
     # Coarsen

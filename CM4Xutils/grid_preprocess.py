@@ -189,7 +189,7 @@ def ds_to_grid(ds, Zprefix=None):
     )
 
 def add_sigma2_coords(ds):
-    """Add the standard CM4X 72-layer sigma2 coordinates to dataset.
+    """Add the standard CM4X 74-layer sigma2 coordinates to dataset.
 
     Parameters
     ----------
@@ -204,6 +204,51 @@ def add_sigma2_coords(ds):
         dirname = os.path.dirname(__file__)
         filename = os.path.join(dirname, "../data/sigma2_coords.nc")
         sigma2_coords = xr.open_dataset(filename)
+        sigma2_coords_expanded = xr.Dataset(
+            coords={
+                "sigma2_i": xr.DataArray(
+                    np.concatenate((
+                        [sigma2_coords.sigma2_i.values[0]-1000],
+                        sigma2_coords.sigma2_i.values,
+                        [sigma2_coords.sigma2_i.values[-1]+1000]
+                    )),
+                    dims=("sigma2_i",),
+                    attrs=sigma2_coords.sigma2_i.attrs
+                ),
+                "rho2_i": xr.DataArray(
+                    np.concatenate((
+                        [sigma2_coords.rho2_i.values[0]-1000],
+                        sigma2_coords.rho2_i.values,
+                        [sigma2_coords.rho2_i.values[-1]+1000]
+                    )),
+                    dims=("sigma2_i",),
+                    attrs=sigma2_coords.rho2_i.attrs
+                ),
+            },
+            attrs={"description":"CM4X 74-layer sigma2 coordinate grid, expanded on both ends to include all plausible ocean densities."}
+        )
+        sigma2_coords_expanded = sigma2_coords_expanded.assign_coords({
+            "sigma2_l": xr.DataArray(
+                np.concatenate((
+                    [np.mean(sigma2_coords_expanded.sigma2_i.values[0:2])],
+                    sigma2_coords.sigma2_l.values,
+                    [np.mean(sigma2_coords_expanded.sigma2_i.values[-2:])]
+                )),
+                dims=("sigma2_l",),
+                attrs=sigma2_coords.sigma2_l.attrs
+            ),
+            "rho2_l": xr.DataArray(
+                np.concatenate((
+                    [np.mean(sigma2_coords_expanded.rho2_i.values[0:2])],
+                    sigma2_coords.rho2_l.values,
+                    [np.mean(sigma2_coords_expanded.rho2_i.values[-2:])]
+                )),
+                dims=("sigma2_l",),
+                attrs=sigma2_coords.rho2_l.attrs
+            ),
+        })
+        sigma2_coords = sigma2_coords_expanded
+
         for c in sigma2_coords.dims:
             sigma2_coords.coords[c].attrs = sigma2_coords.coords[c.replace("sigma2", "rho2")].attrs
             sigma2_coords.coords[c].attrs["long_name"] = sigma2_coords.coords[c].attrs["long_name"].replace(
