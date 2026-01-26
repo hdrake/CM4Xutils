@@ -130,7 +130,7 @@ def itp_tracer_to_transports(grid, tracer, transport_X, transport_Y):
     tracer_right = xr.where(
         np.logical_and(~np.isnan(tracer_right.roll({xo:-1})), ~np.isnan(tracer_right)),
         0.5*sum([tracer_right.roll({xo:-1}), tracer_right]),
-        0.
+        np.nan
     )
     tracer_X = xr.concat([
         tracer_right.isel({xo:[-1]}).assign_coords(
@@ -145,7 +145,7 @@ def itp_tracer_to_transports(grid, tracer, transport_X, transport_Y):
     tracer_right = xr.where(
         np.logical_and(~np.isnan(tracer_right.roll({yo:-1})), ~np.isnan(tracer_right)),
         0.5*sum([tracer_right.roll({yo:-1}), tracer_right]),
-        0.
+        np.nan
     )
     tracer_Y = xr.concat([
         tracer_right.isel({yo:[-1]}).assign_coords(
