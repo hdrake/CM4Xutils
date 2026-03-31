@@ -110,7 +110,15 @@ def add_grid_coords(ds, og):
     })
     if ("thkcello" not in ds) and ("volcello" in ds) and ("areacello" in ds):
         ds['thkcello'] = ds['volcello']/ds['areacello']
-
+        ds['thkcello'].attrs = {
+            'long_name': 'Cell Thickness',
+            'units': 'm',
+            'cell_methods': 'area:mean z_l:sum yh:mean xh:mean time: mean',
+            'cell_measures': 'volume: volcello area: areacello',
+            'time_avg_info': 'average_T1,average_T2,average_DT',
+            'standard_name': 'cell_thickness'
+        }
+        
     correct_cell_methods(ds)
 
     return ds
