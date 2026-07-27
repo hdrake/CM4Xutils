@@ -1,3 +1,12 @@
+"""Conservative vertical remapping (e.g. depth `z` -> potential density `sigma2`).
+
+`remap_vertical_coord` is the core routine: it uses each variable's ``cell_methods``
+attribute to decide how to remap (extensive quantities are transformed directly;
+intensive ones are thickness-weighted, transformed, then normalized by the remapped
+thickness). `itp_tracer_to_transports` is a helper that interpolates the target
+density onto cell faces so that transports `umo`/`vmo` can be remapped consistently.
+"""
+
 from .grid_preprocess import *
 from .version import __version__
 
@@ -30,6 +39,11 @@ def remap_vertical_coord(coord, ds, grid):
     """
 
     def transform_to_target_coord(da, target_coord):
+        # Conservatively bin `da` onto the target `{coord}_i` interfaces using
+        # `target_coord` (the target density evaluated at the source Z interfaces),
+        # then relabel the resulting interface axis as the layer-center axis.
+        # NaNs are filled with 0 on the way in and out so binning treats dry/empty
+        # cells as zero content rather than propagating NaNs.
         return (
             grid.transform(
                 da.fillna(0.),
@@ -50,6 +64,9 @@ def remap_vertical_coord(coord, ds, grid):
 {coord} coordinates by Henri F. Drake (hfdrake@uci.edu) using the
 CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). """
 
+    # Process thkcello (and its snapshot) first: intensive variables are
+    # normalized by the *remapped* thickness below, so it must already exist
+    # in `ds_trans` by the time those variables are handled.
     data_vars = (
         [v for v in ["thkcello", "thkcello_bounds"] if v in ds.data_vars] +
         [v for v in ds.data_vars if "thkcello" not in v]
@@ -68,6 +85,9 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
             else:
                 da = ds[v]
 
+            # Forward-fill the target density through dry (NaN) cells so it stays
+            # defined below topography, then interpolate from layer centers to the
+            # cell interfaces where the conservative transform expects it.
             target_coord = ds[f"{coord}{suffix}"].ffill(dim=Z_l, limit=None)
             zcoord_at_interface = (
                 grid.interp(target_coord, "Z", boundary="extend").chunk({Z_i: -1})
@@ -79,6 +99,8 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
                 h = ds_trans[f"thkcello{suffix}"].fillna(0.)
                 ds_trans[v] = (ds_trans[v]/h).where(ds_trans[v]!=0.)
 
+    # Transports live on cell faces, not tracer centers, so the target density
+    # must first be interpolated onto the u- and v-faces before remapping umo/vmo.
     if all([v in ds.data_vars for v in ["umo", "vmo"]]):
         coord_X, coord_Y = itp_tracer_to_transports(
             grid,
@@ -86,14 +108,17 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
             ds.umo,
             ds.vmo
         )
+        # Fill dry faces vertically, then interpolate the face density to interfaces.
         coord_X_filled = coord_X.ffill(dim=Z_l, limit=None)
         coord_Y_filled = coord_Y.ffill(dim=Z_l, limit=None)
-        
+
         ds[f"{coord}_u"] = grid.interp(
             coord_X_filled,
             "Z",
             boundary="extend"
         ).chunk({Z_i: -1})
+        # `.where(density)` keeps only truthy (nonzero, non-NaN) densities: real
+        # ocean sigma2 is never 0, so this masks out the artificial 0-fill on land.
         ds_trans["umo"] = transform_to_target_coord(
             ds.umo,
             ds[f"{coord}_u"].where(ds[f"{coord}_u"])
@@ -109,7 +134,8 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
             ds[f"{coord}_v"].where(ds[f"{coord}_v"])
         )
 
-    # Re-assign attributes
+    # Re-assign variable attributes, rewriting the vertical cell method key from
+    # the source axis (e.g. "z_l") to the new target axis (e.g. "sigma2_l").
     for v in ds_trans.data_vars:
         ds_trans[v].attrs = ds[v].attrs
         cell_methods_dict = parse_cell_methods(ds_trans[v].cell_methods)
@@ -117,13 +143,34 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
             {k.replace(Z_l, f"{coord}_l"):v for (k,v) in cell_methods_dict.items()}
         )
 
+    # Carry over coordinate attributes that the transform dropped.
     for c in ds_trans.coords:
         if ds_trans.coords[c].attrs == {}:
             ds_trans.coords[c].attrs = ds.coords[c].attrs
-    
+
     return ds_trans
 
 def itp_tracer_to_transports(grid, tracer, transport_X, transport_Y):
+    """Interpolate a tracer from cell centers onto the u- and v-transport faces.
+
+    The conservative remapping of `umo`/`vmo` needs the target coordinate (e.g.
+    `sigma2`) evaluated on the *faces* where the transports live, not on the tracer
+    cell centers. This averages the tracer of the two cells adjacent to each face,
+    returning NaN wherever either neighbor is dry so that face densities are only
+    defined where the transport itself is (this NaN-handling was the v1.2.0 fix).
+
+    Parameters
+    ----------
+    grid : `xgcm.Grid`
+    tracer : `xr.DataArray` on tracer cell centers (xh, yh)
+    transport_X : `xr.DataArray` u-transport on the x-faces (xq, yh)
+    transport_Y : `xr.DataArray` v-transport on the y-faces (xh, yq)
+
+    Returns
+    -------
+    (tracer_X, tracer_Y) : the tracer averaged onto the x-faces and y-faces
+    """
+    # --- x-faces: average each cell center with its neighbor to the "right" ---
     xc = grid.axes['X'].coords['center']
     xo = grid.axes['X'].coords['outer']
     tracer_right = tracer.rename({xc:xo}).assign_coords({xo:transport_X[xo][1:]})
@@ -139,6 +186,7 @@ def itp_tracer_to_transports(grid, tracer, transport_X, transport_Y):
         tracer_right
     ], dim=xo).assign_coords(transport_X.coords).chunk({xo:-1})
 
+    # --- y-faces: same construction, averaging across the Y axis instead ---
     yc = grid.axes['Y'].coords['center']
     yo = grid.axes['Y'].coords['outer']
     tracer_right = tracer.rename({yc:yo}).assign_coords({yo:transport_Y[yo][1:]})
