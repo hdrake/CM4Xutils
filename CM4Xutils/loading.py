@@ -354,7 +354,7 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
         )
 
     if load_hist and load_ssp5:
-        forc = concat_scenarios(hist, ssp5)
+        forc = concat_scenarios([hist, ssp5])
     elif load_hist:
         forc = hist
     elif load_ssp5:
@@ -365,7 +365,7 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
 
     if load_ctrl_continued:
         if load_ctrl:
-            ctrl = concat_scenarios(ctrl, ctrl_continued)
+            ctrl = concat_scenarios([ctrl, ctrl_continued])
         else:
             ctrl = ctrl_continued
     
@@ -392,7 +392,7 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
                 spinup.expand_dims({'exp': ["forced"]}),
                 spinup.expand_dims({'exp': ["control"]})
             ], dim="exp", combine_attrs="override")
-            ds = concat_scenarios(spinup, ds)
+            ds = concat_scenarios([spinup, ds])
     
     if test:
         with dask.config.set(**{'array.slicing.split_large_chunks': True}):
