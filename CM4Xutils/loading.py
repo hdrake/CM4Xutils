@@ -2,6 +2,7 @@ import numpy as np
 import dask
 import xarray as xr
 import xwmt
+import xeos
 import xgcm
 import doralite
 import gfdl_utils.core as gu
@@ -9,6 +10,28 @@ import cftime
 
 from .grid_preprocess import *
 from .coarsen import *
+
+# The CM4X MOM6 runs were configured with EQN_OF_STATE="WRIGHT" (verified from the
+# MOM_parameter_doc of both CM4Xp25 and CM4Xp125). We compute sigma2 offline with the
+# *same* equation of state via xeos, rather than gsw/TEOS-10 (which the model never used).
+#
+# xeos "wright97-reduced" has byte-identical coefficients and an identical density formula
+# to MOM6's legacy WRIGHT kernel; the two differ only in floating-point addition
+# associativity (~1e-12 kg/m3), so this matches the online density to machine precision.
+# (MOM6's documented `use_Wright_2nd_deriv_bug` affects only second derivatives, not
+# density or the alpha/beta first derivatives.) Once a bit-exact legacy kernel is vendored
+# in xeos, this can become `xeos.from_model("MOM6", "WRIGHT")`.
+CM4X_EOS = xeos.from_model("MOM6", "WRIGHT_REDUCED")
+
+
+def cm4x_watermass(grid):
+    """Build an `xwmt.WaterMass` configured with the CM4X model equation of state.
+
+    MOM6's Wright EOS consumes potential temperature and practical salinity directly, so
+    the temperature/salinity kind conversions in `get_density` are no-ops (no gsw call) and
+    sigma2 is evaluated at its 2000 dbar reference pressure using `CM4X_EOS`.
+    """
+    return xwmt.WaterMass(grid, eos=CM4X_EOS, t_var="potential", s_var="practical")
 
 exp_dict = {
     "CM4Xp25": {
@@ -114,7 +137,7 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
         vgrid = Grid(
             av_tend,
             coords={"Z": {"center":"z_l", "outer":"z_i"}},
-            boundary={"Z":"extend"},
+            padding={"Z":"extend"},
             autoparse_metadata=False
         )
         av_tend["rsdoabsorb"] = -vgrid.diff(av_tend.rsdo.chunk({"z_i":-1}), "Z")
@@ -146,7 +169,7 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     hgrid = Grid(
         av_surf,
         coords=hcoords,
-        boundary={"X":"periodic", "Y":"extend"},
+        padding={"X":"periodic", "Y":"extend"},
         autoparse_metadata=False
     )
     if 'taux' in hgrid._ds.data_vars:
@@ -171,7 +194,7 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
             av_surf,
             coords=coords,
             metrics={('X','Y'): "areacello"},
-            boundary={"X":"periodic", "Y":"extend"},
+            padding={"X":"periodic", "Y":"extend"},
             autoparse_metadata=False
         )
         av_surf = horizontally_coarsen(
@@ -489,8 +512,8 @@ def load_density(odiv, time="*"):
 
     # Compute potential density variables
     coords = {'Z': {'center': 'z_l', 'outer': 'z_i'}}
-    wm_kwargs = {"coords": coords, "metrics":{}, "boundary":{"Z":"extend"}, "autoparse_metadata":False}
-    wm_averages = xwmt.WaterMass(xgcm.Grid(ds[["thetao", "so", "thkcello", "z_i"]], **wm_kwargs))
+    wm_kwargs = {"coords": coords, "metrics":{}, "padding":{"Z":"extend"}, "autoparse_metadata":False}
+    wm_averages = cm4x_watermass(xgcm.Grid(ds[["thetao", "so", "thkcello", "z_i"]], **wm_kwargs))
     ds["sigma2"] = wm_averages.get_density("sigma2")
 
     for (c,a) in c_attrs.items():
@@ -544,8 +567,8 @@ def load_density_annual(odiv, time="*"):
 
     # Compute potential density variables
     coords = {'Z': {'center': 'zl', 'outer': 'zi'}}
-    wm_kwargs = {"coords": coords, "metrics":{}, "boundary":{"Z":"extend"}, "autoparse_metadata":False}
-    wm_averages = xwmt.WaterMass(xgcm.Grid(ds[["thetao", "so", "thkcello", "zi"]], **wm_kwargs))
+    wm_kwargs = {"coords": coords, "metrics":{}, "padding":{"Z":"extend"}, "autoparse_metadata":False}
+    wm_averages = cm4x_watermass(xgcm.Grid(ds[["thetao", "so", "thkcello", "zi"]], **wm_kwargs))
     ds["sigma2"] = wm_averages.get_density("sigma2")
 
     for (c,a) in c_attrs.items():
@@ -607,7 +630,7 @@ def regrid_ice(ds, og, ig):
                 ds_ice,
                 coords={"X":{'center':'xh'},"Y": {'center':'yh'}},
                 metrics={('X','Y'): "areacello"},
-                boundary={"X":"periodic", "Y":"extend"},
+                padding={"X":"periodic", "Y":"extend"},
                 autoparse_metadata=False
             )
             ds_ice = horizontally_coarsen(
@@ -658,7 +681,7 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
                 og,
                 coords=coords,
                 metrics={('X','Y'): "areacello"},
-                boundary={"X":"periodic", "Y":"extend"},
+                padding={"X":"periodic", "Y":"extend"},
                 autoparse_metadata=False
             )
             og = horizontally_coarsen(
@@ -682,7 +705,7 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
             grid_native = Grid(
                 ds_native,
                 coords={"X":{"center":"xh", "outer":"xq"}, "Y":{"center":"yh", "outer":"yq"}},
-                boundary={"X":"periodic", "Y":"extend"},
+                padding={"X":"periodic", "Y":"extend"},
                 metrics={('X', 'Y'):['areacello']},
                 autoparse_metadata=False
             )
@@ -751,8 +774,8 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
     
     # Compute potential density variables
     coords = {'Z': grid.axes['Z'].coords}
-    wm_kwargs = {"coords": coords, "metrics":{}, "boundary":{"Z":"extend"}, "autoparse_metadata":False}
-    wm_averages = xwmt.WaterMass(
+    wm_kwargs = {"coords": coords, "metrics":{}, "padding":{"Z":"extend"}, "autoparse_metadata":False}
+    wm_averages = cm4x_watermass(
         xgcm.Grid(grid._ds[["thetao", "so", "thkcello", coords["Z"]["outer"]]], **wm_kwargs)
     )
     grid._ds["sigma2"] = wm_averages.get_density("sigma2")
@@ -762,7 +785,7 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
         coords["Z"]["outer"]]
     ]
     rename_vardict = {v:v.split("_")[0] for v in snapshot_state_vars.data_vars}
-    wm_snapshots = xwmt.WaterMass(xgcm.Grid(snapshot_state_vars.rename(rename_vardict), **wm_kwargs))
+    wm_snapshots = cm4x_watermass(xgcm.Grid(snapshot_state_vars.rename(rename_vardict), **wm_kwargs))
     grid._ds["sigma2_bounds"] = wm_snapshots.get_density("sigma2")
 
     for (c,a) in c_attrs.items():

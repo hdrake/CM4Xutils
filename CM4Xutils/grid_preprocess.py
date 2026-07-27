@@ -186,13 +186,13 @@ def ds_to_grid(ds, Zprefix=None):
     else:
         metrics = {}
     
-    boundary = {"X":"periodic", "Y":"extend", "Z":"extend"}
-    
+    padding = {"X":"periodic", "Y":"extend", "Z":"extend"}
+
     return Grid(
         ds,
         coords=coords,
         metrics=metrics,
-        boundary=boundary,
+        padding=padding,  # xgcm>=0.10 renamed `boundary` -> `padding` (same vocabulary)
         autoparse_metadata=False
     )
 
@@ -284,7 +284,14 @@ def add_sigma2_coords(ds):
             "volume": "volcello",
             "area": "areacello",
             "time_avg_info": "average_T1,average_T2,average_DT",
-            "description": "Computed offline using the gsw python package implementation of TEOS10.",
+            "equation_of_state": "wright97-reduced (xeos; MOM6 EQN_OF_STATE=WRIGHT)",
+            "description": (
+                "Computed offline with the MOM6 Wright (1997) reduced-range equation of "
+                "state via xeos (wright97-reduced), matching the CM4X model configuration "
+                "EQN_OF_STATE='WRIGHT' to machine precision (identical coefficients and "
+                "density formula; differs from MOM6's legacy kernel only by floating-point "
+                "addition associativity, ~1e-12 kg/m3)."
+            ),
         }
     if "sigma2_bounds" in ds.data_vars:
         ds.sigma2_bounds.attrs = {
@@ -293,7 +300,14 @@ def add_sigma2_coords(ds):
             "cell_methods": "area:mean z_l:mean yh:mean xh:mean time:point",
             "volume": "volcello",
             "area": "areacello",
-            "description": "Computed offline using the gsw python package implementation of TEOS10."
+            "equation_of_state": "wright97-reduced (xeos; MOM6 EQN_OF_STATE=WRIGHT)",
+            "description": (
+                "Computed offline with the MOM6 Wright (1997) reduced-range equation of "
+                "state via xeos (wright97-reduced), matching the CM4X model configuration "
+                "EQN_OF_STATE='WRIGHT' to machine precision (identical coefficients and "
+                "density formula; differs from MOM6's legacy kernel only by floating-point "
+                "addition associativity, ~1e-12 kg/m3)."
+            ),
         }
 
     return ds

@@ -70,7 +70,7 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
 
             target_coord = ds[f"{coord}{suffix}"].ffill(dim=Z_l, limit=None)
             zcoord_at_interface = (
-                grid.interp(target_coord, "Z", boundary="extend").chunk({Z_i: -1})
+                grid.interp(target_coord, "Z", padding="extend").chunk({Z_i: -1})
             )
             ds_trans[v] = transform_to_target_coord(da, zcoord_at_interface)
 
@@ -92,7 +92,7 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
         ds[f"{coord}_u"] = grid.interp(
             coord_X_filled,
             "Z",
-            boundary="extend"
+            padding="extend"
         ).chunk({Z_i: -1})
         ds_trans["umo"] = transform_to_target_coord(
             ds.umo,
@@ -102,7 +102,7 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
         ds[f"{coord}_v"] = grid.interp(
             coord_Y_filled,
             "Z",
-            boundary="extend"
+            padding="extend"
         ).chunk({Z_i: -1})
         ds_trans["vmo"] = transform_to_target_coord(
             ds.vmo,

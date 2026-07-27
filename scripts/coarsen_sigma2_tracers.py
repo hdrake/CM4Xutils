@@ -19,6 +19,6 @@ for start_year in np.arange(interval_start, interval_start+interval_length, 5):
 
     filename = f"../data/coarsened/{model}_{experiment}_tracers_sigma2_{year_range}.zarr"
     ds = remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year)
-    ds.attrs["version"] = "v1.1.0"
-    ds.attrs["version_notes"] = """Between v1.0.0 and v1.1.0, CM4Xutils has been upgraded to major release v1.1.0. The only change is that a bug in the area-weighted-average coarsening of mean-mean-sum variables (like thkcello and budget diagnostics) in depth coordinates. This change should not affect any density-binned diagnostics, as those were already using the correct area masks."""
+    ds.attrs["version"] = "v1.3.0"
+    ds.attrs["version_notes"] = """As of v1.3.0, the offline potential density (sigma2) coordinate is now computed with the MOM6 Wright (1997) reduced-range equation of state via xeos (xwmt eos="wright97-reduced"), self-consistently matching the CM4X model configuration EQN_OF_STATE="WRIGHT", instead of the gsw/TEOS-10 implementation used through v1.1.0. This shifts sigma2 (and all density-binned tracer diagnostics) by O(0.01-0.1 kg/m3). It matches the online model density to machine precision (~1e-12 kg/m3)."""
     ds.to_zarr(filename, mode="w")
