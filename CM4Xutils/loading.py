@@ -29,8 +29,9 @@ from .coarsen import *
 def _experiment_description(model):
     """Return the standard human-readable description of the CM4X experiment design."""
     return (
-f"""The {model} experimental design following Griffies et al.
-(to be submitted to JAMES around 09/2024).
+f"""The {model} experimental design following Griffies et al., published in the
+Journal of Advances in Modeling Earth Systems (JAMES):
+https://doi.org/10.1029/2024MS004861 and https://doi.org/10.1029/2024MS004862.
 
 The `control` experiment type is a ocean-sea ice-atmosphere-land coupled
 climate model run with CO2 concentrations in the atmosphere
@@ -814,14 +815,50 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
     
     grid = ds_to_grid(ds)
 
-    # Correct fsitherm and prlq ocean flux diagnostics using the RAIN ice diagnostic:
-    # the archived ocean `prlq` (liquid precipitation into the ocean) also includes
-    # the sea-ice melt/freeze freshwater flux, so split it back out into true rainfall
-    # (`RAIN`, from the ice model) and the frazil sea-ice flux (`fsitherm = prlq - RAIN`).
-    # `fsitherm` is required in the guard so we never index a missing variable.
-    if all([e in ds.data_vars for e in ["prlq", "RAIN", "fsitherm"]]):
-        ds["fsitherm"].data = ds["prlq"].data - ds["RAIN"].data
-        ds["prlq"].data = ds["RAIN"].data
+    # Correct fsitherm and prlq ocean freshwater flux diagnostics using the RAIN
+    # ice diagnostic. The archived ocean `prlq` (liquid precipitation into the
+    # ocean) also lumps in the sea-ice melt/freeze (frazil) freshwater flux, which
+    # physically belongs to `fsitherm`. We split it back out so that
+    #   prlq     -> true rainfall (RAIN, from the ice model), and
+    #   fsitherm -> the sea-ice freshwater flux (prlq - RAIN).
+    # `fsitherm` is not always archived, and when it is it may be empty, so we only
+    # (re)compute it when it is either:
+    #   1) missing entirely, or
+    #   2) present but empty (all NaN and/or zero) while RAIN differs from prlq.
+    # A `fsitherm` that already carries nonzero values is assumed correct and left
+    # untouched (case 3).
+    if all([e in ds.data_vars for e in ["prlq", "RAIN"]]):
+        fsitherm_missing = "fsitherm" not in ds.data_vars
+        if fsitherm_missing:
+            needs_correction = True
+        elif bool((ds["fsitherm"].fillna(0.) == 0.).all()):
+            # fsitherm exists but is empty: only worth splitting if RAIN actually
+            # differs from prlq (otherwise fsitherm would just be zeros anyway).
+            needs_correction = bool(
+                (ds["RAIN"].fillna(0.) != ds["prlq"].fillna(0.)).any()
+            )
+        else:
+            # fsitherm already carries nonzero values -> assume it is correct.
+            needs_correction = False
+
+        if needs_correction:
+            fsitherm = ds["prlq"] - ds["RAIN"]
+            if fsitherm_missing:
+                # Inherit prlq's metadata (same units and grid staggering) but
+                # relabel it as the sea-ice thermodynamic freshwater flux.
+                fsitherm.attrs = {
+                    **ds["prlq"].attrs,
+                    "long_name": (
+                        "Water Flux into Sea Water due to Sea Ice Thermodynamics"
+                    ),
+                    "standard_name": (
+                        "water_flux_into_sea_water_due_to_sea_ice_thermodynamics"
+                    ),
+                }
+                ds["fsitherm"] = fsitherm
+            else:
+                ds["fsitherm"].data = fsitherm.data
+            ds["prlq"].data = ds["RAIN"].data
 
     # Construct 3D h_tendency from wfo if it does not exist
     if "boundary_forcing_h_tendency" not in grid._ds:
