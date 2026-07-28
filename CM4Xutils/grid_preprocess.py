@@ -298,6 +298,60 @@ def add_sigma2_coords(ds):
 
     return ds
 
+def rho2_transports_to_sigma2(ds_rho2, sigma2_l, sigma2_i):
+    """Relabel native `rho2`-layer transports onto the padded 76-layer `sigma2` grid.
+
+    MOM6 archives the layer-integrated mass transports `umo`/`vmo` (and `thkcello`)
+    directly in potential-density (`rho2`) coordinates in the `ocean_month_rho2` pp
+    output, where `sigma2 = rho2 - 1000`. These native 74 `rho2` layers are exactly the
+    interior of the 76-layer target `sigma2` grid built by `add_sigma2_coords` (which
+    pads one extra layer at each end). We therefore swap the vertical dimension to
+    `sigma2_l`, zero-pad one layer at each end (no transport exists outside the diagnostic
+    density range), and assign the target coordinates. No floating-point coordinate
+    matching and no offline vertical remapping is performed -- these transports are the
+    model's own online density-binned diagnostics.
+
+    Parameters
+    ----------
+    ds_rho2 : `xr.Dataset` on the native `rho2_l` coordinate (e.g. from
+        `load_rho2_transports` / `load_rho2_transports_ds`).
+    sigma2_l : `xr.DataArray` of the 76 target layer centers (from a dataset that has been
+        passed through `add_sigma2_coords`).
+    sigma2_i : `xr.DataArray` of the 77 target layer interfaces.
+
+    Returns
+    -------
+    ds : `xr.Dataset` with the transports relabeled onto the `sigma2_l` coordinate.
+    """
+    n_native = ds_rho2.sizes["rho2_l"]
+    n_interior = sigma2_l.sizes["sigma2_l"] - 2
+    if n_native != n_interior:
+        raise ValueError(
+            f"Native rho2 diagnostic has {n_native} layers but the target sigma2 grid "
+            f"has {n_interior} interior layers; they must match to relabel without "
+            f"remapping."
+        )
+
+    ds = ds_rho2.drop_vars(
+        [c for c in ["rho2_l", "rho2_i"] if c in ds_rho2.coords]
+    )
+    ds = ds.rename({"rho2_l": "sigma2_l"})
+    ds = ds.assign_coords({"sigma2_l": sigma2_l.isel(sigma2_l=slice(1, -1)).values})
+
+    # Zero-pad the two expansion layers (no transport outside the diagnostic range)
+    ds = ds.pad(sigma2_l=(1, 1), constant_values=0.)
+    ds = ds.assign_coords({"sigma2_l": sigma2_l, "sigma2_i": sigma2_i})
+
+    # Relabel the vertical part of each variable's cell_methods (rho2_l -> sigma2_l)
+    for v in ds.data_vars:
+        if "cell_methods" in ds[v].attrs:
+            cm = parse_cell_methods(ds[v].attrs["cell_methods"])
+            if "rho2_l" in cm:
+                cm["sigma2_l"] = cm.pop("rho2_l")
+                ds[v].attrs["cell_methods"] = stringify_cell_methods_dict(cm)
+
+    return ds
+
 def correct_cell_methods(ds):
     """Correct cell methods for depth and wet mask coordinates.
 

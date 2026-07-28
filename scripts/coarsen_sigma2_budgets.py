@@ -18,6 +18,6 @@ for start_year in np.arange(interval_start, interval_start+interval_length, 5):
     filename = f"../data/coarsened/{model}_budgets_sigma2_{year_range}.zarr"
     ds = remap_budgets_to_sigma2_and_coarsen(model, start_year)
     ds = ds.chunk({"time":1, "time_bounds":1})
-    ds.attrs["version"] = "v1.2.0"
-    ds.attrs["version_notes"] = """Between v1.1.0 and v1.2.0, CM4Xutils has been upgraded to major release v1.2.0. The only change is that a bug in the remapping of transports ("umo" and "vmo") to "sigma2_l" coordinates. This change does not affect any other diagnostics."""
+    ds.attrs["version"] = "v1.4.0"
+    ds.attrs["version_notes"] = """In v1.4.0, the mass transports ("umo" and "vmo") are taken directly from the model's native density-coordinate ("ocean_month_rho2") diagnostics where available, instead of being remapped offline from z-coordinates. MOM6 accumulates these transports online into potential-density layers, conserving mass exactly within each layer, so they are much more accurate than the previous (<=v1.3.0) offline z->sigma2 remapping. This applies to CM4Xp125, which archives both "umo" and "vmo" in "ocean_month_rho2". CM4Xp25 archives only "vmo" (no "umo") in density coordinates, so its "umo"/"vmo" continue to use the offline remap and are unchanged from v1.3.0. Only the CM4Xp125 "umo"/"vmo" fields change; all other diagnostics are unaffected."""
     ds.to_zarr(filename, mode="w")

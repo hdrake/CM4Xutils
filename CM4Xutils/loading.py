@@ -1,3 +1,5 @@
+import os
+import glob
 import numpy as np
 import dask
 import xarray as xr
@@ -268,39 +270,59 @@ def expand_surface_fluxes(grid):
             attrs["long_name"] = f"Convergence of {attrs['long_name']}"
             grid._ds[v].attrs = attrs
 
-def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
-    """Load a comprehensive CM4X dataset with all variables required to run `xwmb`."""
+def _interval_load_flags(model, interval, test=False):
+    """Determine which experiments and time patterns to load for a given interval.
+
+    Shared by `load_wmt_ds` and `load_rho2_transports_ds` so that both build the same
+    control/forced `exp` structure and calendar alignment for a given `interval`.
+
+    Returns
+    -------
+    dict with keys: "time", "time_ctrl", "interval", "load_spin", "load_ctrl",
+    "load_ctrl_continued", "load_hist", "load_ssp5".
+    """
     if test:
-        time =      "201001*"
-        time_ctrl = "026101*"
-        interval  = "2010"
-        load_spin = False
-        load_ctrl = True
-        load_ctrl_continued = False
-        load_hist = True
-        load_ssp5 = False
-    elif interval=="all":
-        time = "*"
-        time_ctrl = "*"
-        load_spin = True
-        load_ctrl = True
-        load_ctrl_continued = True
-        load_hist = True
-        load_ssp5 = True
+        return {
+            "time": "201001*", "time_ctrl": "026101*", "interval": "2010",
+            "load_spin": False, "load_ctrl": True, "load_ctrl_continued": False,
+            "load_hist": True, "load_ssp5": False,
+        }
+    elif interval == "all":
+        return {
+            "time": "*", "time_ctrl": "*", "interval": interval,
+            "load_spin": True, "load_ctrl": True, "load_ctrl_continued": True,
+            "load_hist": True, "load_ssp5": True,
+        }
     elif interval.isnumeric():
-        if (int(interval)%5)==0:
-            time = f"{interval}01*"
-            interval_ctrl = str(int(interval)-1749)
-            time_ctrl = f"{interval_ctrl.zfill(4)}01*"
-            load_spin = int(interval) < 1850
-            load_ctrl = 1850 <= int(interval)
+        if (int(interval) % 5) == 0:
+            interval_ctrl = str(int(interval) - 1749)
             continue_year = 361 if (model == "CM4Xp25") else 451
-            load_ctrl = (1850 <= int(interval)) & (int(interval_ctrl) < continue_year)
-            load_ctrl_continued = (int(interval_ctrl) >= continue_year)
-            load_hist = (1850 <= int(interval)) & (int(interval) < 2015)
-            load_ssp5 = (2015 <= int(interval)) & (int(interval) < 2100)
+            return {
+                "time": f"{interval}01*",
+                "time_ctrl": f"{interval_ctrl.zfill(4)}01*",
+                "interval": interval,
+                "load_spin": int(interval) < 1850,
+                "load_ctrl": (1850 <= int(interval)) & (int(interval_ctrl) < continue_year),
+                "load_ctrl_continued": (int(interval_ctrl) >= continue_year),
+                "load_hist": (1850 <= int(interval)) & (int(interval) < 2015),
+                "load_ssp5": (2015 <= int(interval)) & (int(interval) < 2100),
+            }
         else:
             raise ValueError("interval must be an integer multiple of 5.")
+    else:
+        raise ValueError("interval must be 'all' or an integer multiple of 5.")
+
+def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
+    """Load a comprehensive CM4X dataset with all variables required to run `xwmb`."""
+    flags = _interval_load_flags(model, interval, test=test)
+    time                = flags["time"]
+    time_ctrl           = flags["time_ctrl"]
+    interval            = flags["interval"]
+    load_spin           = flags["load_spin"]
+    load_ctrl           = flags["load_ctrl"]
+    load_ctrl_continued = flags["load_ctrl_continued"]
+    load_hist           = flags["load_hist"]
+    load_ssp5           = flags["load_ssp5"]
 
     # Load mass/heat/salt budget diagnostics align times
     if load_spin:
@@ -414,6 +436,164 @@ in 1850 and is forced with historical CMIP6 forcings until 2014 and afterwards
 follows the SSP5-8.5 high-emissions forcing scenario."""
     )
     
+    return ds
+
+def _rho2_pp(model, exp):
+    """Resolve the pp path for one experiment (Dora, with hard-coded fallback)."""
+    try:
+        return doralite.dora_metadata(exp_dict[model][exp])['pathPP']
+    except:
+        print("Dora seems to be down. Using hard-coded paths instead.")
+        return pp_dict[model][exp]
+
+def available_rho2_transports(model, exp):
+    """Return which of {'umo','vmo'} are archived in native `ocean_month_rho2`.
+
+    CM4X does not archive the same density-coordinate transports for every model:
+    CM4Xp125 saves both `umo` and `vmo`, but CM4Xp25 saves only `vmo`. We probe the
+    filesystem so the budget pipeline adapts automatically rather than hard-coding this.
+    """
+    pp = _rho2_pp(model, exp)
+    local = gu.get_local(pp, "ocean_month_rho2", "ts")
+    base = os.path.join(pp, "ocean_month_rho2", "ts", local)
+    return {v for v in ["umo", "vmo"] if glob.glob(os.path.join(base, f"*.{v}.nc"))}
+
+def native_rho2_transport_vars(model, interval="all"):
+    """Transport vars available natively across *all* experiments loaded for `interval`.
+
+    Returns the intersection of `available_rho2_transports` over the experiments that
+    `_interval_load_flags` selects, so the budget pipeline only sources a transport
+    natively when it exists for every branch it needs to concatenate.
+    """
+    flags = _interval_load_flags(model, interval)
+    exps = [e for (e, key) in [
+        ("piControl-spinup",    "load_spin"),
+        ("piControl",           "load_ctrl"),
+        ("piControl-continued", "load_ctrl_continued"),
+        ("historical",          "load_hist"),
+        ("ssp585",              "load_ssp5"),
+    ] if flags[key]]
+    avail = None
+    for e in exps:
+        a = available_rho2_transports(model, e)
+        avail = a if avail is None else (avail & a)
+    return avail or set()
+
+def load_rho2_transports(model, exp, time="*", dmget=False, mirror=False, transport_vars=None):
+    """Load native density-coordinate mass transports for one experiment.
+
+    MOM6 accumulates the layer-integrated transports `umo`/`vmo` (and `thkcello`)
+    *online* into potential-density (`rho2`) layers and archives them in the
+    `ocean_month_rho2` pp output, where they conserve mass exactly within each density
+    layer. This is much more accurate than remapping z-coordinate transports offline, so
+    the budget pipeline sources transports from here rather than from
+    `remap_vertical_coord`. See `load_rho2` in the CM4XTransientTracers `preprocessing`
+    module for the analogous single-experiment loader this follows.
+
+    `transport_vars` selects which of {'umo','vmo'} to load; if None, whichever are
+    archived (`available_rho2_transports`) are used. Returns an `xr.Dataset` (not a grid)
+    on the native `rho2_l` coordinate so it can be passed through `concat_scenarios` /
+    `align_dates` by `load_rho2_transports_ds`.
+    """
+    pp = _rho2_pp(model, exp)
+    ppname = "ocean_month_rho2"
+    out = "ts"
+    local = gu.get_local(pp, ppname, out)
+    if transport_vars is None:
+        transport_vars = available_rho2_transports(model, exp)
+    load_vars = sorted(transport_vars) + ["thkcello"]
+    ds = gu.open_frompp(
+        pp, ppname, out, local, time, load_vars,
+        dmget=dmget, mirror=mirror
+    )
+    ds = ds.chunk({"time": 1, "rho2_l": -1})
+
+    og = gu.open_static(pp, ppname)
+    sg = xr.open_dataset(exp_dict[model]["hgrid"])
+    og = fix_geo_coords(og, sg)
+    ds = add_grid_coords(ds, og)
+
+    ds.attrs["model"] = model
+    return ds
+
+def load_rho2_transports_ds(model, dmget=False, mirror=False, interval="all"):
+    """Load native rho2 transports with the same structure as `load_wmt_ds`.
+
+    Mirrors the experiment-selection, `exp`-dimension concatenation, and calendar
+    alignment of `load_wmt_ds` (via the shared `_interval_load_flags` helper,
+    `concat_scenarios`, and `align_dates`) so the returned transports can be merged
+    directly into the budget product. Only transports available across *all* loaded
+    experiments (`native_rho2_transport_vars`) are loaded, so the concatenation is
+    consistent. Transports are time-means only, so none of the snapshot / `time_bounds`
+    machinery of `load_wmt_ds` is needed here.
+    """
+    flags = _interval_load_flags(model, interval)
+    time                = flags["time"]
+    time_ctrl           = flags["time_ctrl"]
+    load_spin           = flags["load_spin"]
+    load_ctrl           = flags["load_ctrl"]
+    load_ctrl_continued = flags["load_ctrl_continued"]
+    load_hist           = flags["load_hist"]
+    load_ssp5           = flags["load_ssp5"]
+
+    tvars = native_rho2_transport_vars(model, interval)
+
+    if load_spin:
+        print(f"Loading {model}-piControl-spinup transports for interval `{interval}`.")
+        spinup = load_rho2_transports(model, "piControl-spinup", time=time_ctrl, dmget=dmget, mirror=mirror, transport_vars=tvars)
+    if load_ctrl:
+        print(f"Loading {model}-piControl transports for interval `{interval}`.")
+        ctrl = load_rho2_transports(model, "piControl", time=time_ctrl, dmget=dmget, mirror=mirror, transport_vars=tvars)
+    if load_ctrl_continued:
+        print(f"Loading {model}-piControl-continued transports for interval `{interval}`.")
+        ctrl_continued = load_rho2_transports(model, "piControl-continued", time=time_ctrl, dmget=dmget, mirror=mirror, transport_vars=tvars)
+    if load_hist:
+        print(f"Loading {model}-historical transports for interval `{interval}`.")
+        hist = load_rho2_transports(model, "historical", time=time, dmget=dmget, mirror=mirror, transport_vars=tvars)
+    if load_ssp5:
+        print(f"Loading {model}-ssp585 transports for interval `{interval}`.")
+        ssp5 = load_rho2_transports(model, "ssp585", time=time, dmget=dmget, mirror=mirror, transport_vars=tvars)
+
+    if load_hist and load_ssp5:
+        forc = concat_scenarios([hist, ssp5])
+    elif load_hist:
+        forc = hist
+    elif load_ssp5:
+        forc = ssp5
+
+    if load_ctrl_continued:
+        if load_ctrl:
+            ctrl = concat_scenarios([ctrl, ctrl_continued])
+        else:
+            ctrl = ctrl_continued
+
+    # Case 1: only spinup intervals
+    if load_spin and not(load_ctrl):
+        ds = xr.concat([
+            spinup.expand_dims({'exp': ["forced"]}),
+            spinup.expand_dims({'exp': ["control"]})
+        ], dim="exp", combine_attrs="override")
+
+    # Case 2: control period (including forced runs)
+    elif load_ctrl | load_ctrl_continued:
+        if (load_hist) | (load_ssp5):
+            ctrl, forc = align_dates(ctrl, forc)
+            ds = xr.concat([
+                forc.expand_dims({'exp': ["forced"]}),
+                ctrl.expand_dims({'exp': ["control"]})
+            ], dim="exp", combine_attrs="override")
+        else:
+            ds = ctrl.expand_dims({'exp': ["control"]})
+
+        if load_spin:
+            spinup = xr.concat([
+                spinup.expand_dims({'exp': ["forced"]}),
+                spinup.expand_dims({'exp': ["control"]})
+            ], dim="exp", combine_attrs="override")
+            ds = concat_scenarios([spinup, ds])
+
+    ds.coords["exp"].attrs = {"long_name": "Experiment type"}
+    ds.attrs["model"] = model
     return ds
 
 def load_tracer(odiv, tracer, time="*"):

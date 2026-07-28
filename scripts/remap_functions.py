@@ -16,11 +16,32 @@ def remap_budgets_to_sigma2_and_coarsen(model, start_year):
         "CM4Xp25": {"X": 6, "Y": 6},
         "CM4Xp125": {"X": 6, "Y": 5}, # Note: these are already on d2 grid
     }
-    
+    # Native rho2 transports are archived at native resolution, so for CM4Xp125 they need
+    # twice the coarsening of the d2 budget diagnostics to land on the same coarse grid
+    # (d2 == native coarsened by 2).
+    transport_coarsen_dims = {
+        "CM4Xp25": {"X": 6, "Y": 6},
+        "CM4Xp125": {"X": 12, "Y": 10},
+    }
+
+    # Only source transports from the native rho2 diagnostics when BOTH `umo` and `vmo`
+    # are archived across all experiments in this interval. CM4Xp125 saves both; CM4Xp25
+    # saves only `vmo`, so CM4Xp25 keeps the offline z->sigma2 transport remapping for
+    # both terms (auto-detected, not hard-coded).
+    native_vars = native_rho2_transport_vars(model, interval=str(start_year))
+    use_native_transports = native_vars == {"umo", "vmo"}
+    if use_native_transports:
+        print(f"Using native rho2 transports (umo, vmo) for {model}.")
+    else:
+        print(
+            f"Native rho2 transports unavailable for {model} "
+            f"(found {sorted(native_vars)}); using offline z->sigma2 remap for umo/vmo."
+        )
+
     with warnings.catch_warnings():
         warnings.simplefilter(action='ignore', category=FutureWarning)
         warnings.simplefilter(action='ignore', category=UserWarning)
-    
+
         grid = load_wmt_grid(
             model,
             interval=str(start_year),
@@ -29,8 +50,12 @@ def remap_budgets_to_sigma2_and_coarsen(model, start_year):
 
         ds = add_sigma2_coords(grid._ds)
         vars_2d = [v for v in ds.data_vars if sorted(ds[v].dims) == ['exp', 'time', 'xh', 'yh']]
+        # When using native transports, skip the offline z->sigma2 remap of umo/vmo.
         ds_sigma2 = xr.merge([
-            remap_vertical_coord("sigma2", ds, grid),
+            remap_vertical_coord(
+                "sigma2", ds, grid,
+                remap_transports=not use_native_transports
+            ),
             ds[vars_2d]
         ])
         grid_sigma2 = ds_to_grid(ds_sigma2)
@@ -44,6 +69,52 @@ def remap_budgets_to_sigma2_and_coarsen(model, start_year):
         ds_sigma2_coarse = ds_sigma2_coarse.assign_coords(
             {"sigma2_i": ds_sigma2.coords["sigma2_i"]}
         )
+
+    # --- Native density-coordinate transports (umo, vmo) from ocean_month_rho2 ---
+    if use_native_transports:
+        with warnings.catch_warnings():
+            warnings.simplefilter(action='ignore', category=FutureWarning)
+            warnings.simplefilter(action='ignore', category=UserWarning)
+
+            ds_trans = load_rho2_transports_ds(
+                model,
+                interval=str(start_year),
+                dmget=True
+            )
+            ds_trans = rho2_transports_to_sigma2(
+                ds_trans,
+                ds_sigma2.coords["sigma2_l"],
+                ds_sigma2.coords["sigma2_i"],
+            )
+            grid_trans = ds_to_grid(ds_trans)
+
+        with dask.config.set(**{'array.slicing.split_large_chunks': False}):
+            ds_trans_coarse = horizontally_coarsen(
+                ds_trans,
+                grid_trans,
+                dim = transport_coarsen_dims[model]
+            )
+
+        # Adopt the budget product's horizontal coordinates (identical geometry up to
+        # floating point) so umo/vmo slot cleanly into the same coarse grid.
+        shared_coords = [
+            "xh", "yh", "xq", "yq",
+            "geolon", "geolat", "geolon_u", "geolat_u",
+            "geolon_v", "geolat_v", "geolon_c", "geolat_c",
+            "areacello", "wet", "wet_u", "wet_v", "dxCv", "dyCu",
+        ]
+        ds_trans_coarse = ds_trans_coarse.assign_coords({
+            c: ds_sigma2_coarse.coords[c]
+            for c in shared_coords
+            if (c in ds_sigma2_coarse.coords) and (c in ds_trans_coarse.coords)
+        })
+
+        # Insert onto the budget product's dims/coords without triggering label alignment
+        # (both went through the same `align_dates`, so positions already correspond).
+        umo = ds_trans_coarse["umo"].transpose("exp", "time", "sigma2_l", "yh", "xq")
+        vmo = ds_trans_coarse["vmo"].transpose("exp", "time", "sigma2_l", "yq", "xh")
+        ds_sigma2_coarse["umo"] = xr.DataArray(umo.data, dims=umo.dims, attrs=umo.attrs)
+        ds_sigma2_coarse["vmo"] = xr.DataArray(vmo.data, dims=vmo.dims, attrs=vmo.attrs)
 
     ordered_dims = [
         'exp', 'time', 'time_bounds', 'sigma2_l', 'sigma2_i',

@@ -1,11 +1,11 @@
 from .grid_preprocess import *
 from .version import __version__
 
-def remap_vertical_coord(coord, ds, grid):
+def remap_vertical_coord(coord, ds, grid, remap_transports=True):
     """"Remap vertical coordinate to target coordinate
 
     Uses `cell_method` attribute in `ds.data_vars` variables
-    to determine how to vertically remap. For extensive 
+    to determine how to vertically remap. For extensive
     variables (e.g. with `"zl:sum" in `cell_method`), we simply
     do a conservative remapping. For intensive variables (e.g.
     with `"zl:mean"`), however, we need to conservatively remap
@@ -14,7 +14,12 @@ def remap_vertical_coord(coord, ds, grid):
     to get the intensive values.
 
     For `umo` and `vmo`, we interpolate the target tracer concentration
-    onto the corresponding cell faces and then do the remapping.
+    onto the corresponding cell faces and then do the remapping. This
+    offline transport remapping is only an approximation of the model's
+    online density binning; the budget pipeline instead sources `umo`/`vmo`
+    directly from the native `ocean_month_rho2` diagnostics (see
+    `load_rho2_transports` / `rho2_transports_to_sigma2`) and calls this
+    function with `remap_transports=False`.
 
     Parameters
     ----------
@@ -23,6 +28,11 @@ def remap_vertical_coord(coord, ds, grid):
         Only tested case is "sigma2".
     ds : `xr.Dataset`
     grid : `xgcm.Grid`
+    remap_transports : bool (default: True)
+        If True, also remap `umo`/`vmo` by interpolating the target coordinate
+        onto cell faces (the fallback path for when native density-coordinate
+        transports are unavailable). If False, `umo`/`vmo` are left out of the
+        remapped dataset entirely.
 
     Returns
     -------
@@ -79,7 +89,7 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
                 h = ds_trans[f"thkcello{suffix}"].fillna(0.)
                 ds_trans[v] = (ds_trans[v]/h).where(ds_trans[v]!=0.)
 
-    if all([v in ds.data_vars for v in ["umo", "vmo"]]):
+    if remap_transports and all([v in ds.data_vars for v in ["umo", "vmo"]]):
         coord_X, coord_Y = itp_tracer_to_transports(
             grid,
             ds[coord],
