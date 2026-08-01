@@ -1,9 +1,24 @@
+"""GFDL-specific loaders for CM4X post-processed diagnostics.
+
+These functions only run on GFDL analysis machines: they depend on `doralite`
+(experiment metadata), `gfdl_utils` (``open_frompp`` / static-file access),
+`/archive` paths, and ``dmget`` tape retrieval.
+
+`exp_dict` / `pp_dict` map (model, experiment) to Dora IDs and hard-coded ``pp``
+paths. The high-level entry point is `load_wmt_grid` -> `load_wmt_ds` ->
+`load_wmt_averages_and_snapshots`, which assembles time-mean budget tendencies,
+surface fluxes, sea-ice diagnostics, and bounding snapshots into a single dataset
+carrying both a `time` (monthly-mean) and `time_bounds` (snapshot) axis, and a
+`control`/`forced` `exp` dimension. See CLAUDE.md for the full pipeline.
+"""
+
 import os
 import glob
 import numpy as np
 import dask
 import xarray as xr
 import xwmt
+import xeos
 import xgcm
 import doralite
 import gfdl_utils.core as gu
@@ -11,6 +26,70 @@ import cftime
 
 from .grid_preprocess import *
 from .coarsen import *
+
+# The CM4X MOM6 runs were configured with EQN_OF_STATE="WRIGHT" (verified from the
+# MOM_parameter_doc.all of both CM4Xp25 and CM4Xp125). We compute sigma2 offline with the
+# *same* equation of state via xeos, rather than gsw/TEOS-10 (which the model never used).
+#
+# xeos "wright97-reduced" has byte-identical coefficients and an identical density formula
+# to MOM6's legacy WRIGHT kernel; the two differ only in floating-point addition
+# associativity (~1e-12 kg/m3), so this matches the online density to machine precision.
+# (MOM6's documented `use_Wright_2nd_deriv_bug` affects only second derivatives, not
+# density or the alpha/beta first derivatives.) Once a bit-exact legacy kernel is vendored
+# in xeos, this can become `xeos.from_model("MOM6", "WRIGHT")`.
+CM4X_EOS = xeos.from_model("MOM6", "WRIGHT_REDUCED")
+
+
+def cm4x_watermass(grid):
+    """Build an `xwmt.WaterMass` configured with the CM4X model equation of state.
+
+    `t_var` / `s_var` declare the *kinds* of the archived `thetao` and `so`, which is how
+    `xwmt` decides whether to convert them before evaluating `CM4X_EOS`. Declaring them
+    potential/practical -- the kinds MOM6's Wright EOS consumes -- makes that conversion a
+    no-op, so `thetao`/`so` go straight into Wright. That is bit-for-bit the operation
+    MOM6 performs online, so the offline sigma2 reproduces the model's own density.
+
+    Two independent checks confirm potential/practical is the correct declaration here:
+
+    - MOM6's `USE_CONTEMP_ABSSAL` is the switch that declares the prognostic tracers to be
+      conservative temperature and absolute salinity (`MOM.F90` sets `tv%T_is_conT` /
+      `tv%S_is_absS` from it, which relabel the T/S diagnostics and trigger gsw
+      conversions in `MOM_EOS.F90`). Both CM4Xp25 and CM4Xp125 ran with
+      `USE_CONTEMP_ABSSAL = False`, i.e. the model itself declares its T/S to be potential
+      temperature and practical salinity.
+    - The archived diagnostics agree: `thetao` carries
+      `standard_name = "sea_water_potential_temperature"` and `so` is in psu.
+
+    This is a statement about the model's internal convention, not about which variable is
+    the most physically faithful. McDougall et al. (2021) argue that a model conserving
+    heat as `Cp*T` with constant `Cp` is better interpreted as carrying conservative
+    temperature, and that reading is why `xwmt` defaults to
+    `t_var="conservative"` / `s_var="absolute"`. But that argument is about how to compare
+    MOM6 output to observations; it does not change what MOM6 actually computed. Since the
+    purpose here is a sigma2 consistent with the model's own dynamics -- the density that
+    set the isopycnal structure and the water-mass transformation being diagnosed -- we
+    reproduce the model's arithmetic exactly.
+    """
+    return xwmt.WaterMass(grid, eos=CM4X_EOS, t_var="potential", s_var="practical")
+
+
+# The three loaders below stamp the same human-readable experiment description
+# onto their output; keep it in one place so it cannot drift between them.
+def _experiment_description(model):
+    """Return the standard human-readable description of the CM4X experiment design."""
+    return (
+f"""The {model} experimental design following Griffies et al., published in the
+Journal of Advances in Modeling Earth Systems (JAMES):
+https://doi.org/10.1029/2024MS004861 and https://doi.org/10.1029/2024MS004862.
+
+The `control` experiment type is a ocean-sea ice-atmosphere-land coupled
+climate model run with CO2 concentrations in the atmosphere
+prescribed at 280 ppm (preindustrial levels).
+
+The `forced` experiment type branches off from the preindustrial control
+in 1850 and is forced with historical CMIP6 forcings until 2014 and afterwards
+follows the SSP5-8.5 high-emissions forcing scenario."""
+    )
 
 exp_dict = {
     "CM4Xp25": {
@@ -68,7 +147,25 @@ pp_dict = {
 }
 
 def get_wmt_pathDict(model, exp, category, time="*", add="*"):
-    """Retrieve dictionary of keyword arguments for `gfdl_utils.core.open_frompp`."""
+    """Retrieve keyword arguments for `gfdl_utils.core.open_frompp`.
+
+    Resolves the ``pp`` root via Dora (falling back to the hard-coded `pp_dict`
+    paths if Dora is unreachable) and picks the ``ppname`` (pp component) that
+    holds the requested `category` of diagnostics. For CM4Xp125, 3D categories are
+    taken from the "d2" (2x-coarsened) components while surface fields stay native.
+
+    Parameters
+    ----------
+    model : "CM4Xp25" or "CM4Xp125"
+    exp : experiment name (key of `exp_dict[model]`)
+    category : one of {"surface", "tendency", "native", "snapshot", "ice"}
+    time : GFDL time glob passed through to `open_frompp`
+    add : extra variable(s) to request alongside the category's probe variable
+
+    Returns
+    -------
+    dict : keyword arguments (pp, ppname, out, local, time, add) for `open_frompp`
+    """
     try:
         pp = doralite.dora_metadata(exp_dict[model][exp])['pathPP']
     except:
@@ -105,8 +202,30 @@ def get_wmt_pathDict(model, exp, category, time="*", add="*"):
 chunk = {"time":1, "z_l":-1, "yh":-1, "xh":-1, "yq":-1, "xq":-1}
 chunk_center = {"time":1, "z_l":-1, "yh":-1, "xh":-1}
 def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=False):
-    """Load time-averaged water mass transformation budget diags and bounding snapshots"""
-    
+    """Load time-averaged WMT budget diagnostics and their bounding snapshots.
+
+    Assembles, for a single (model, experiment):
+      - time-mean heat/salt budget tendencies (+ derived shortwave convergence),
+      - surface state variables and mass/heat/salt/momentum fluxes (wind stress is
+        interpolated to tracer points; for CM4Xp125 all surface fields are coarsened
+        by 2x to match the "d2" grid the tendencies live on),
+      - sea-ice diagnostics (renamed onto their own xh_ice/yh_ice grid),
+      - instantaneous snapshots renamed onto a `time_bounds` axis with a `_bounds`
+        suffix, including the trailing snapshot of the preceding 5-year interval
+        (with hard-coded corner cases at experiment branch points).
+
+    Parameters
+    ----------
+    model : "CM4Xp25" or "CM4Xp125"
+    exp : experiment name (e.g. "piControl", "historical", "ssp585")
+    time : GFDL time glob (e.g. "*" for all, or "185001*" for one 5-year interval)
+    dmget, mirror : forwarded to `gfdl_utils.core.open_frompp` for tape staging
+
+    Returns
+    -------
+    ds_merged : `xr.Dataset` with both `time` (averages) and `time_bounds` (snapshots)
+    """
+
     # Get time-averaged heat and salt budget tendencies
     pdict_tend = get_wmt_pathDict(model, exp, "tendency", time=time)
     av_tend = gu.open_frompp(**pdict_tend, dmget=dmget, mirror=mirror)
@@ -116,7 +235,7 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
         vgrid = Grid(
             av_tend,
             coords={"Z": {"center":"z_l", "outer":"z_i"}},
-            boundary={"Z":"extend"},
+            padding={"Z":"extend"},
             autoparse_metadata=False
         )
         av_tend["rsdoabsorb"] = -vgrid.diff(av_tend.rsdo.chunk({"z_i":-1}), "Z")
@@ -148,7 +267,7 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     hgrid = Grid(
         av_surf,
         coords=hcoords,
-        boundary={"X":"periodic", "Y":"extend"},
+        padding={"X":"periodic", "Y":"extend"},
         autoparse_metadata=False
     )
     if 'taux' in hgrid._ds.data_vars:
@@ -173,7 +292,7 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
             av_surf,
             coords=coords,
             metrics={('X','Y'): "areacello"},
-            boundary={"X":"periodic", "Y":"extend"},
+            padding={"X":"periodic", "Y":"extend"},
             autoparse_metadata=False
         )
         av_surf = horizontally_coarsen(
@@ -203,39 +322,40 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     # Case 2: we are only reading in a specific 5 yr interval,
     # in which case we also need the last snapshot from the prior interval.
     elif (time!="*") & (time!="000101*"):
-        interval_preceeding = str(np.int64(time.split("*")[0][:-2]) - 5).zfill(4)
+        interval_preceding = str(np.int64(time.split("*")[0][:-2]) - 5).zfill(4)
         # Awkward corner cases where the prior interval is actually from a different experiment
-        if interval_preceeding in ["0096", "1845"]:
-            pdict_snap_preceeding = get_wmt_pathDict(
+        if interval_preceding in ["0096", "1845"]:
+            pdict_snap_preceding = get_wmt_pathDict(
                 model, "piControl-spinup", "snapshot", time=f"009601*"
             )
-        elif (model == "CM4Xp25") and interval_preceeding in ["0356"]:
-            pdict_snap_preceeding = get_wmt_pathDict(
+        elif (model == "CM4Xp25") and interval_preceding in ["0356"]:
+            pdict_snap_preceding = get_wmt_pathDict(
                 model, "piControl", "snapshot", time=f"035601*"
             )
-        elif (model == "CM4Xp125") and interval_preceeding in ["0446"]:
-            pdict_snap_preceeding = get_wmt_pathDict(
+        elif (model == "CM4Xp125") and interval_preceding in ["0446"]:
+            pdict_snap_preceding = get_wmt_pathDict(
                 model, "piControl", "snapshot", time=f"044601*"
             )
-        elif interval_preceeding=="2010":
-            pdict_snap_preceeding = get_wmt_pathDict(
+        elif interval_preceding=="2010":
+            pdict_snap_preceding = get_wmt_pathDict(
                 model, "historical", "snapshot", time=f"201001*"
             )
         else:
-            pdict_snap_preceeding = get_wmt_pathDict(
-                model, exp, "snapshot", time=f"{interval_preceeding}01*"
+            pdict_snap_preceding = get_wmt_pathDict(
+                model, exp, "snapshot", time=f"{interval_preceding}01*"
             )
         pdict_snap = get_wmt_pathDict(model, exp, "snapshot", time=time)
         snapshots = xr.concat(
             [
-                gu.open_frompp(**pdict_snap_preceeding, dmget=dmget, mirror=mirror).chunk(chunk_center).isel(time=-1),# only the last
+                gu.open_frompp(**pdict_snap_preceding, dmget=dmget, mirror=mirror).chunk(chunk_center).isel(time=-1),# only the last
                 gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror).chunk(chunk_center)
             ],
             dim="time"
         )
 
-    # Fix
-
+    # Move snapshots onto their own `time_bounds` axis and suffix every snapshot
+    # variable with `_bounds`, so time-mean and instantaneous fields can coexist
+    # in one merged dataset without name collisions.
     snapshots = snapshots.rename({
         **{'time':'time_bounds'},
         **{v:f"{v}_bounds" for v in snapshots.data_vars}
@@ -252,12 +372,19 @@ def load_wmt_grid(model, **kwargs):
     return grid
 
 def expand_surface_fluxes(grid):
+    """Recast 2D surface fluxes as 3D layer convergences, in place on `grid._ds`.
+
+    `xwmb` treats surface boundary fluxes as a convergence into the topmost model
+    layer. This inserts each 2D flux into the vertical grid at the surface (zeros
+    elsewhere) via `xwmt.WaterMass.expand_surface_array_vertically`, and rewrites
+    its `cell_methods`/`long_name` to reflect the new 3D "Convergence of ..." field.
+    """
     mass_fluxes = ["wfo", "prlq", "prsn", "evs", "fsitherm", "friver", "ficeberg", "vprec"]
     heat_fluxes = ["hflso", "hfsso", "rlntds", "heat_content_surfwater"]
     salt_fluxes = ["sfdsi"]
     sice_fluxes = ["EVAP", "LSNK", "LSRC", "RAIN", "SNOWFL"]
     surf_fluxes = mass_fluxes + heat_fluxes + salt_fluxes + sice_fluxes
-    
+
     with dask.config.set(**{'array.slicing.split_large_chunks': False}):
         wm = xwmt.WaterMass(grid)
         for v in surf_fluxes:
@@ -295,7 +422,10 @@ def _interval_load_flags(model, interval, test=False):
         }
     elif interval.isnumeric():
         if (int(interval) % 5) == 0:
+            # Control years are offset by 1749 from the forced (historical) calendar.
             interval_ctrl = str(int(interval) - 1749)
+            # The piControl was extended ("continued") from a later restart, so the
+            # continued branch takes over once the control year reaches `continue_year`.
             continue_year = 361 if (model == "CM4Xp25") else 451
             return {
                 "time": f"{interval}01*",
@@ -310,7 +440,10 @@ def _interval_load_flags(model, interval, test=False):
         else:
             raise ValueError("interval must be an integer multiple of 5.")
     else:
-        raise ValueError("interval must be 'all' or an integer multiple of 5.")
+        raise ValueError(
+            f"interval must be 'all' or a string of an integer multiple of 5, "
+            f"got {interval!r}."
+        )
 
 def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
     """Load a comprehensive CM4X dataset with all variables required to run `xwmb`."""
@@ -423,19 +556,8 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
 
     ds.coords["exp"].attrs = {"long_name": "Experiment type"}
     ds.attrs["model"] = model
-    ds.attrs["description"] = (
-    f"""The {model} experimental design following Griffies et al.
-(to be submitted to JAMES around 09/2024).
+    ds.attrs["description"] = _experiment_description(model)
 
-The `control` experiment type is a ocean-sea ice-atmosphere-land coupled
-climate model run with CO2 concentrations in the atmosphere
-prescribed at 280 ppm (preindustrial levels).
-
-The `forced` experiment type branches off from the preindustrial control
-in 1850 and is forced with historical CMIP6 forcings until 2014 and afterwards
-follows the SSP5-8.5 high-emissions forcing scenario."""
-    )
-    
     return ds
 
 def _rho2_pp(model, exp):
@@ -669,8 +791,8 @@ def load_density(odiv, time="*"):
 
     # Compute potential density variables
     coords = {'Z': {'center': 'z_l', 'outer': 'z_i'}}
-    wm_kwargs = {"coords": coords, "metrics":{}, "boundary":{"Z":"extend"}, "autoparse_metadata":False}
-    wm_averages = xwmt.WaterMass(xgcm.Grid(ds[["thetao", "so", "thkcello", "z_i"]], **wm_kwargs))
+    wm_kwargs = {"coords": coords, "metrics":{}, "padding":{"Z":"extend"}, "autoparse_metadata":False}
+    wm_averages = cm4x_watermass(xgcm.Grid(ds[["thetao", "so", "thkcello", "z_i"]], **wm_kwargs))
     ds["sigma2"] = wm_averages.get_density("sigma2")
 
     for (c,a) in c_attrs.items():
@@ -684,19 +806,8 @@ def load_density(odiv, time="*"):
     correct_cell_methods(ds)
 
     ds.attrs["model"] = model
-    ds.attrs["description"] = (
-    f"""The {model} experimental design following Griffies et al.
-(to be submitted to JAMES around 09/2024).
+    ds.attrs["description"] = _experiment_description(model)
 
-The `control` experiment type is a ocean-sea ice-atmosphere-land coupled
-climate model run with CO2 concentrations in the atmosphere
-prescribed at 280 ppm (preindustrial levels).
-
-The `forced` experiment type branches off from the preindustrial control
-in 1850 and is forced with historical CMIP6 forcings until 2014 and afterwards
-follows the SSP5-8.5 high-emissions forcing scenario."""
-    )
-    
     return ds
 
 def load_density_annual(odiv, time="*"):
@@ -724,8 +835,8 @@ def load_density_annual(odiv, time="*"):
 
     # Compute potential density variables
     coords = {'Z': {'center': 'zl', 'outer': 'zi'}}
-    wm_kwargs = {"coords": coords, "metrics":{}, "boundary":{"Z":"extend"}, "autoparse_metadata":False}
-    wm_averages = xwmt.WaterMass(xgcm.Grid(ds[["thetao", "so", "thkcello", "zi"]], **wm_kwargs))
+    wm_kwargs = {"coords": coords, "metrics":{}, "padding":{"Z":"extend"}, "autoparse_metadata":False}
+    wm_averages = cm4x_watermass(xgcm.Grid(ds[["thetao", "so", "thkcello", "zi"]], **wm_kwargs))
     ds["sigma2"] = wm_averages.get_density("sigma2")
 
     for (c,a) in c_attrs.items():
@@ -739,19 +850,8 @@ def load_density_annual(odiv, time="*"):
     correct_cell_methods(ds)
 
     ds.attrs["model"] = model
-    ds.attrs["description"] = (
-    f"""The {model} experimental design following Griffies et al.
-(to be submitted to JAMES around 09/2024).
+    ds.attrs["description"] = _experiment_description(model)
 
-The `control` experiment type is a ocean-sea ice-atmosphere-land coupled
-climate model run with CO2 concentrations in the atmosphere
-prescribed at 280 ppm (preindustrial levels).
-
-The `forced` experiment type branches off from the preindustrial control
-in 1850 and is forced with historical CMIP6 forcings until 2014 and afterwards
-follows the SSP5-8.5 high-emissions forcing scenario."""
-    )
-    
     return ds
 
 def load_transient_tracers(odiv, time="*"):
@@ -771,6 +871,23 @@ def load_transient_tracers(odiv, time="*"):
     return grid
 
 def regrid_ice(ds, og, ig):
+    """Move sea-ice diagnostics onto the ocean tracer grid and merge them in.
+
+    Sea-ice fields arrive on their own grid (`xh_ice`/`yh_ice`). When that grid is
+    twice as fine as the ocean tracer grid (the CM4Xp125 case), they are area-weighted
+    coarsened by 2x using the ice `CELL_AREA` and ocean `wet` mask; otherwise they are
+    simply renamed. The result is merged back onto the ocean `xh`/`yh` coordinates.
+
+    Parameters
+    ----------
+    ds : `xr.Dataset` containing ocean and (xh_ice/yh_ice) sea-ice diagnostics
+    og : ocean static `xr.Dataset` (provides `wet`)
+    ig : ice static `xr.Dataset` (provides `CELL_AREA`)
+
+    Returns
+    -------
+    ds : `xr.Dataset` with sea-ice fields regridded onto the ocean tracer grid
+    """
     if "xh_ice" in ds.coords:
         ds_ice = ds.drop_dims(["xh", "yh"])
         ds_ice = ds_ice.rename({"xh_ice":"xh", "yh_ice":"yh"})
@@ -787,7 +904,7 @@ def regrid_ice(ds, og, ig):
                 ds_ice,
                 coords={"X":{'center':'xh'},"Y": {'center':'yh'}},
                 metrics={('X','Y'): "areacello"},
-                boundary={"X":"periodic", "Y":"extend"},
+                padding={"X":"periodic", "Y":"extend"},
                 autoparse_metadata=False
             )
             ds_ice = horizontally_coarsen(
@@ -804,7 +921,24 @@ def regrid_ice(ds, og, ig):
             
 
 def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
-    """Make a comprehensive `xwmb`-compatible `xgcm.Grid` object."""
+    """Make a comprehensive `xwmb`-compatible `xgcm.Grid` object.
+
+    Attaches corrected grid coordinates (from the supergrid, and for CM4Xp125 by
+    re-coarsening the full-resolution static file and applying a native-derived 3D
+    wet mask), regrids sea ice, derives `boundary_forcing_h_tendency` from `wfo` if
+    absent, and computes `sigma2` / `sigma2_bounds` from the (snapshot) state before
+    returning the `xgcm.Grid`.
+
+    Parameters
+    ----------
+    ds : `xr.Dataset` from `load_wmt_ds` (must carry `ds.attrs["model"]`)
+    overwrite_grid : if False, keep `ds`'s existing coordinates instead of rebuilding
+    overwrite_supergrid : if True, rebuild geo-coordinates from the supergrid
+
+    Returns
+    -------
+    grid : `xgcm.Grid`
+    """
 
     c_attrs = {
         c:ds.coords[c].attrs.copy() for c in ds.coords
@@ -838,7 +972,7 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
                 og,
                 coords=coords,
                 metrics={('X','Y'): "areacello"},
-                boundary={"X":"periodic", "Y":"extend"},
+                padding={"X":"periodic", "Y":"extend"},
                 autoparse_metadata=False
             )
             og = horizontally_coarsen(
@@ -862,7 +996,7 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
             grid_native = Grid(
                 ds_native,
                 coords={"X":{"center":"xh", "outer":"xq"}, "Y":{"center":"yh", "outer":"yq"}},
-                boundary={"X":"periodic", "Y":"extend"},
+                padding={"X":"periodic", "Y":"extend"},
                 metrics={('X', 'Y'):['areacello']},
                 autoparse_metadata=False
             )
@@ -894,7 +1028,7 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
                 if ds[v].ndim == 4:
                     ds[v].attrs["cell_methods"] = 'area:mean yh:mean xh:mean time: mean'
                 else:
-                    ds = ds.drop(v)
+                    ds = ds.drop_vars(v)
     
         # Regrid
         print("Regridding ice")
@@ -907,10 +1041,49 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
     
     grid = ds_to_grid(ds)
 
-    # Correct fsitherm and prlq ocean flux diagnostics using RAIN ice diagnostic
+    # Correct fsitherm and prlq ocean freshwater flux diagnostics using the RAIN
+    # ice diagnostic. The archived ocean `prlq` (liquid precipitation into the
+    # ocean) also lumps in the sea-ice melt/freeze (frazil) freshwater flux, which
+    # physically belongs to `fsitherm`. We split it back out so that
+    #   prlq     -> true rainfall (RAIN, from the ice model), and
+    #   fsitherm -> the sea-ice freshwater flux (prlq - RAIN).
+    # `fsitherm` is not always archived, and when it is it may be empty, so we only
+    # (re)compute it when it is either:
+    #   1) missing entirely, or
+    #   2) present but empty (all NaN and/or zero) while RAIN differs from prlq.
+    # A `fsitherm` that already carries nonzero values is assumed correct and left
+    # untouched (case 3).
     if all([e in ds.data_vars for e in ["prlq", "RAIN"]]):
-        ds["fsitherm"].data = ds["prlq"].data - ds["RAIN"].data
-        if "fsitherm" in ds.data_vars:
+        fsitherm_missing = "fsitherm" not in ds.data_vars
+        if fsitherm_missing:
+            needs_correction = True
+        elif bool((ds["fsitherm"].fillna(0.) == 0.).all()):
+            # fsitherm exists but is empty: only worth splitting if RAIN actually
+            # differs from prlq (otherwise fsitherm would just be zeros anyway).
+            needs_correction = bool(
+                (ds["RAIN"].fillna(0.) != ds["prlq"].fillna(0.)).any()
+            )
+        else:
+            # fsitherm already carries nonzero values -> assume it is correct.
+            needs_correction = False
+
+        if needs_correction:
+            fsitherm = ds["prlq"] - ds["RAIN"]
+            if fsitherm_missing:
+                # Inherit prlq's metadata (same units and grid staggering) but
+                # relabel it as the sea-ice thermodynamic freshwater flux.
+                fsitherm.attrs = {
+                    **ds["prlq"].attrs,
+                    "long_name": (
+                        "Water Flux into Sea Water due to Sea Ice Thermodynamics"
+                    ),
+                    "standard_name": (
+                        "water_flux_into_sea_water_due_to_sea_ice_thermodynamics"
+                    ),
+                }
+                ds["fsitherm"] = fsitherm
+            else:
+                ds["fsitherm"].data = fsitherm.data
             ds["prlq"].data = ds["RAIN"].data
 
     # Construct 3D h_tendency from wfo if it does not exist
@@ -931,8 +1104,8 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
     
     # Compute potential density variables
     coords = {'Z': grid.axes['Z'].coords}
-    wm_kwargs = {"coords": coords, "metrics":{}, "boundary":{"Z":"extend"}, "autoparse_metadata":False}
-    wm_averages = xwmt.WaterMass(
+    wm_kwargs = {"coords": coords, "metrics":{}, "padding":{"Z":"extend"}, "autoparse_metadata":False}
+    wm_averages = cm4x_watermass(
         xgcm.Grid(grid._ds[["thetao", "so", "thkcello", coords["Z"]["outer"]]], **wm_kwargs)
     )
     grid._ds["sigma2"] = wm_averages.get_density("sigma2")
@@ -942,7 +1115,7 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
         coords["Z"]["outer"]]
     ]
     rename_vardict = {v:v.split("_")[0] for v in snapshot_state_vars.data_vars}
-    wm_snapshots = xwmt.WaterMass(xgcm.Grid(snapshot_state_vars.rename(rename_vardict), **wm_kwargs))
+    wm_snapshots = cm4x_watermass(xgcm.Grid(snapshot_state_vars.rename(rename_vardict), **wm_kwargs))
     grid._ds["sigma2_bounds"] = wm_snapshots.get_density("sigma2")
 
     for (c,a) in c_attrs.items():
@@ -956,7 +1129,7 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
     return grid
 
 def concat_scenarios(ds_list):
-    """Concatinate scenarios in list over all "time" dimensions."""
+    """Concatenate scenarios in list over all "time" dimensions."""
     return xr.merge([
         xr.concat([
             ds.drop_dims([dim for dim in ds.dims if (dim!=cdim) & ("time" in dim)])

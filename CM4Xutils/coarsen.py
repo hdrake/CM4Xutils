@@ -1,3 +1,13 @@
+"""Grid-aware horizontal coarsening.
+
+`horizontally_coarsen` reduces a dataset by integer factors in X and/or Y while
+respecting each variable's ``cell_methods``: quantities are area/volume-weighted
+averaged, wet-masked summed, or subsampled depending on whether their method along
+each axis is ``mean``, ``sum``, or ``point``. `subsample_geocoords` then overwrites
+the staggered geographic coordinates by picking the correct sub-cell from the
+original (uncoarsened) supergrid-derived coordinates.
+"""
+
 from .grid_preprocess import *
 from .version import __version__
 
@@ -53,6 +63,12 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
 
         partially_wet_mask = (ds.wet.fillna(0.) > 0.).persist()
         wet_pos = ds.wet.where(ds.wet > 0.).persist()
+
+        # Dispatch on the pair of X/Y cell methods. Three top-level cases:
+        #   (mean, mean) -> weighted average (Case A below),
+        #   (sum,  sum)  -> wet-masked sum   (Case B below),
+        #   otherwise    -> handle each axis separately (Case C: face fields
+        #                   like wet_u/wet_v and any mixed mean/sum/point combos).
 
         # First catch variables that are averaged in both X and Y
         if all([cell_method[dim_var] == "mean" for dim_var in dim_names.values()]):
@@ -267,6 +283,12 @@ def subsample_geocoords(ds_coarse, ds, grid, dim):
     sx = dim["X"]
     sy = dim["Y"]
 
+    # Where a coarse cell's center/face falls on the fine grid depends on the parity
+    # of the coarsening factor: an even factor lands a coarse center on a fine
+    # *corner*/face (q) location, while an odd factor keeps it on a fine *center* (h).
+    # Each block below therefore picks the fine-grid source coordinate (geolon_c/_u/_v
+    # or geolon) and the start offset (sx0, sy0) appropriate to that parity.
+
     ## corner coords
     sx0, sy0 = 0, 0
     ds_coarse = ds_coarse.assign_coords({
@@ -299,7 +321,7 @@ def subsample_geocoords(ds_coarse, ds, grid, dim):
         )
     })
 
-    ## u-velocity coords
+    ## v-velocity coords
     sx0, sy0 = sx//2, 0
     if (sx%2==0) & (sy%2==0):
         lonv,latv = "geolon_c", "geolat_c"
