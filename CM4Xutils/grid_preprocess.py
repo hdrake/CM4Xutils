@@ -220,7 +220,7 @@ def ds_to_grid(ds, Zprefix=None):
         ds,
         coords=coords,
         metrics=metrics,
-        padding=padding,  # xgcm>=0.10 renamed `boundary` -> `padding` (same vocabulary)
+        padding=padding,
         autoparse_metadata=False
     )
 

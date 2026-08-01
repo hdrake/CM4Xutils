@@ -26,7 +26,7 @@ from .grid_preprocess import *
 from .coarsen import *
 
 # The CM4X MOM6 runs were configured with EQN_OF_STATE="WRIGHT" (verified from the
-# MOM_parameter_doc of both CM4Xp25 and CM4Xp125). We compute sigma2 offline with the
+# MOM_parameter_doc.all of both CM4Xp25 and CM4Xp125). We compute sigma2 offline with the
 # *same* equation of state via xeos, rather than gsw/TEOS-10 (which the model never used).
 #
 # xeos "wright97-reduced" has byte-identical coefficients and an identical density formula
@@ -41,9 +41,32 @@ CM4X_EOS = xeos.from_model("MOM6", "WRIGHT_REDUCED")
 def cm4x_watermass(grid):
     """Build an `xwmt.WaterMass` configured with the CM4X model equation of state.
 
-    MOM6's Wright EOS consumes potential temperature and practical salinity directly, so
-    the temperature/salinity kind conversions in `get_density` are no-ops (no gsw call) and
-    sigma2 is evaluated at its 2000 dbar reference pressure using `CM4X_EOS`.
+    `t_var` / `s_var` declare the *kinds* of the archived `thetao` and `so`, which is how
+    `xwmt` decides whether to convert them before evaluating `CM4X_EOS`. Declaring them
+    potential/practical -- the kinds MOM6's Wright EOS consumes -- makes that conversion a
+    no-op, so `thetao`/`so` go straight into Wright. That is bit-for-bit the operation
+    MOM6 performs online, so the offline sigma2 reproduces the model's own density.
+
+    Two independent checks confirm potential/practical is the correct declaration here:
+
+    - MOM6's `USE_CONTEMP_ABSSAL` is the switch that declares the prognostic tracers to be
+      conservative temperature and absolute salinity (`MOM.F90` sets `tv%T_is_conT` /
+      `tv%S_is_absS` from it, which relabel the T/S diagnostics and trigger gsw
+      conversions in `MOM_EOS.F90`). Both CM4Xp25 and CM4Xp125 ran with
+      `USE_CONTEMP_ABSSAL = False`, i.e. the model itself declares its T/S to be potential
+      temperature and practical salinity.
+    - The archived diagnostics agree: `thetao` carries
+      `standard_name = "sea_water_potential_temperature"` and `so` is in psu.
+
+    This is a statement about the model's internal convention, not about which variable is
+    the most physically faithful. McDougall et al. (2021) argue that a model conserving
+    heat as `Cp*T` with constant `Cp` is better interpreted as carrying conservative
+    temperature, and that reading is why `xwmt` defaults to
+    `t_var="conservative"` / `s_var="absolute"`. But that argument is about how to compare
+    MOM6 output to observations; it does not change what MOM6 actually computed. Since the
+    purpose here is a sigma2 consistent with the model's own dynamics -- the density that
+    set the isopycnal structure and the water-mass transformation being diagnosed -- we
+    reproduce the model's arithmetic exactly.
     """
     return xwmt.WaterMass(grid, eos=CM4X_EOS, t_var="potential", s_var="practical")
 
