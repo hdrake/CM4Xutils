@@ -193,8 +193,26 @@ product's horizontal coordinates onto the coarsened transports before merging th
 `vmo` are present across every experiment in the interval (i.e. CM4Xp125). Otherwise
 (CM4Xp25) it falls back to the older offline z→sigma2 transport remap for both terms — via
 `itp_tracer_to_transports` (the v1.2.0 fix, returning NaN where either neighbor is dry),
-preserved behind `remap_vertical_coord(..., remap_transports=True)` (the default). So
-CM4Xp25 `umo`/`vmo` are unchanged from v1.3.0; only CM4Xp125 transports change in v1.4.0.
+preserved behind `remap_vertical_coord(..., remap_transports=True)` (the default). So only
+CM4Xp125 changes *transport provenance* in v1.4.0. CM4Xp25 `umo`/`vmo` still change
+numerically, because the EOS change below shifts the sigma2 bins they are accumulated into.
+
+### The offline sigma2 uses the model's own EOS (v1.4.0+)
+
+CM4X ran with `EQN_OF_STATE = "WRIGHT"`, so the offline sigma2 coordinate is computed with
+the same MOM6 Wright (1997) reduced-range EOS via `xeos`, not gsw/TEOS-10.
+`CM4X_EOS` and `cm4x_watermass(grid)` (loading.py) are the single funnel for this —
+build `xwmt.WaterMass` through `cm4x_watermass`, never `xwmt.WaterMass(grid)` directly,
+or that call silently reverts to gsw. (The two bare `xwmt.WaterMass(grid)` calls that
+remain are deliberate: they only use `expand_surface_array_vertically`, which is
+geometric and never evaluates the EOS.) `cm4x_watermass` declares
+`t_var="potential"` / `s_var="practical"` — see its docstring for why that, and not
+`xwmt`'s conservative/absolute default, reproduces the model's arithmetic. This shifts
+sigma2 by O(0.01–0.1 kg/m³) versus ≤v1.3.0 and matches the online density to ~1e-12 kg/m³.
+
+The two v1.4.0 changes are complementary: the native-transport path relabels the model's
+own `rho2` layers as sigma2, and this makes the offline sigma2 coordinate use the same
+equation of state that defined those layers.
 
 ## Versioning and provenance
 
@@ -209,6 +227,16 @@ package version, update the dataset `version`/`version_notes` strings in
 directories (`data/coarsened_d2_bug/`, `data/coarsened_incorrect_wetmask/`,
 `data/coarsened_nanbugged/`, …) for comparison — don't delete these.
 
+Two of those parallel directories exist specifically to isolate the two v1.4.0 changes
+from each other for the 2010-2014 CM4Xp125 interval:
+
+- `data/coarsened_pre_native_transports/` — offline transports, **gsw** sigma2.
+- `data/coarsened_pre_native_transports_WRIGHT/` — offline transports, **Wright** sigma2.
+
+Differencing the WRIGHT copy against `data/coarsened/` isolates the transport change at
+fixed EOS; differencing it against `coarsened_pre_native_transports/` isolates the EOS
+change at fixed transport provenance.
+
 `data/` is not git-tracked apart from `sigma2_coords.nc`; most of it is generated or
 staged output.
 
@@ -219,6 +247,14 @@ staged output.
   the old offline z→sigma2 remap rather than the native `ocean_month_rho2` diagnostics
   (v1.4.0+). They need regeneration; `scripts/coarsen_sigma2_budgets.py` now stamps
   `v1.4.0`, but `scripts/coarsen_sigma2_tracers.py` may still read an older string.
+- **xarray >= 2026.7.0 breaks the generation scripts.** Nothing pins xarray, so a freshly
+  solved environment picks up 2026.7.0, where rechunking a dask-backed *cftime* variable
+  with a chunk dict that does not name all of its dims raises
+  `ValueError: zip() argument 2 is longer than argument 1` (`_get_chunk` builds
+  `dims` from `chunks.keys()` and then `zip(dims, shape, strict=True)`). The module-level
+  `chunk` dict in `loading.py` omits `nv`, so `load_wmt_averages_and_snapshots` dies on
+  `time_bnds` at `xr.merge([...]).chunk(chunk)`. Known-good: xarray 2025.10.1. Either pin
+  xarray < 2026.7.0 or add the missing dims to `chunk`/`chunk_center`.
 - The existing per-worktree conda environments predate the `CM4Xutils_<name>` naming
   convention and do not follow it, though each is correctly editable-installed against
   its own worktree: `cm4xutils-xeos` → `xwmt-xeos-eos`, `CM4Xutils-rho2-transports` →
