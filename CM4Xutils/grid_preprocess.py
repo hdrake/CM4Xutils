@@ -16,6 +16,16 @@ import xarray as xr
 import numpy as np
 from xgcm import Grid
 
+# Bracketing interfaces of the expanded sigma2 grid built by `add_sigma2_coords`
+# [kg m-3]. The archived CM4X coordinate spans sigma2 = [-3, 39]; one interface is
+# added below and above that range so the conservative remapping has somewhere to
+# put water outside it instead of spilling mass past the outermost layers. Kept
+# just wide enough to cover any plausible ocean density -- widening them only
+# stretches the two expansion layers and pushes their nominal centers away from
+# any density the ocean actually attains.
+SIGMA2_MIN = -10.
+SIGMA2_MAX = 50.
+
 def fix_geo_coords(og, sg):
     """Fix geographical coordinates from static file with supergrid
 
@@ -240,25 +250,25 @@ def add_sigma2_coords(ds):
         dirname = os.path.dirname(__file__)
         filename = os.path.join(dirname, "../data/sigma2_coords.nc")
         sigma2_coords = xr.open_dataset(filename)
-        # Pad one extra interface at each end (shifted by +/-1000 kg/m3) so that
+        # Pad one extra interface at each end (at SIGMA2_MIN / SIGMA2_MAX) so that
         # the target grid brackets every plausible ocean density and the
         # conservative remapping never spills mass past the outermost layers.
         sigma2_coords_expanded = xr.Dataset(
             coords={
                 "sigma2_i": xr.DataArray(
                     np.concatenate((
-                        [sigma2_coords.sigma2_i.values[0]-1000],
+                        [SIGMA2_MIN],
                         sigma2_coords.sigma2_i.values,
-                        [sigma2_coords.sigma2_i.values[-1]+1000]
+                        [SIGMA2_MAX]
                     )),
                     dims=("sigma2_i",),
                     attrs=sigma2_coords.sigma2_i.attrs
                 ),
                 "rho2_i": xr.DataArray(
                     np.concatenate((
-                        [sigma2_coords.rho2_i.values[0]-1000],
+                        [SIGMA2_MIN + 1000.],
                         sigma2_coords.rho2_i.values,
-                        [sigma2_coords.rho2_i.values[-1]+1000]
+                        [SIGMA2_MAX + 1000.]
                     )),
                     dims=("sigma2_i",),
                     attrs=sigma2_coords.rho2_i.attrs
