@@ -27,6 +27,37 @@ from xgcm import Grid
 SIGMA2_MIN = -10.
 SIGMA2_MAX = 50.
 
+def append_provenance(obj, sentence):
+    """Append one processing sentence to an object's ``provenance`` attribute.
+
+    Every step of the pipeline that transforms a variable -- horizontal coarsening,
+    offline vertical remapping, the relabeling of the online-remapped `rho2`
+    transports, the vertical expansion of 2D surface fluxes, interpolation between
+    staggered grid positions, sea-ice regridding, time interpolation -- appends its
+    own sentence here. A variable's ``provenance`` therefore reads as the ordered
+    list of everything that was done to it, which the dataset-level ``provenance``
+    cannot express because different variables take different paths through the
+    pipeline (most obviously `umo`/`vmo`, which are remapped *online* by the model
+    while everything else is remapped offline here).
+
+    Existing text is appended to, never overwritten, and no de-duplication is done:
+    a variable coarsened twice (as CM4Xp125 surface fluxes are, once at load time to
+    reach the "d2" grid and once at the end) should say so twice, with each
+    coarsening factor.
+
+    Parameters
+    ----------
+    obj : `xr.DataArray` or `xr.Dataset`
+    sentence : str, a complete sentence describing one processing step
+
+    Returns
+    -------
+    obj : the same object, modified in place
+    """
+    existing = obj.attrs.get("provenance", "").strip()
+    obj.attrs["provenance"] = f"{existing} {sentence.strip()}".strip()
+    return obj
+
 def chunk_dataset(ds, chunks):
     """`ds.chunk(chunks)`, with every dimension of `ds` named explicitly.
 
@@ -149,9 +180,10 @@ def add_grid_coords(ds, og):
     ds : `xr.Dataset` containing both CM4X diagnostics and coordinates
     """
     
-    og['deptho'] = (
-        og['deptho'].where(~np.isnan(og['deptho']), 0.)
-    )
+    # Land cells carry NaN depth in the static file; treat them as zero depth.
+    # Computed into a local rather than written back into `og`, which several
+    # callers reuse after this call.
+    deptho = og['deptho'].where(~np.isnan(og['deptho']), 0.)
 
     if all([c in og for c in ["dxCv", "dyCu"]]):
         # add velocity face widths to calculate distances along the section
@@ -178,7 +210,7 @@ def add_grid_coords(ds, og):
         'geolat_v': xr.DataArray(og['geolat_v'].values, dims=("yq", "xh",), attrs=og.geolat_v.attrs),
         'geolon_c': xr.DataArray(og['geolon_c'].values, dims=("yq", "xq",), attrs=og.geolon_c.attrs),
         'geolat_c': xr.DataArray(og['geolat_c'].values, dims=("yq", "xq",), attrs=og.geolat_c.attrs),
-        'deptho':   xr.DataArray(og['deptho'].values, dims=("yh", "xh",), attrs=og.deptho.attrs),
+        'deptho':   xr.DataArray(deptho.values, dims=("yh", "xh",), attrs=og.deptho.attrs),
         'wet':   xr.DataArray(og['wet'].values,   dims=("yh", "xh",), attrs=og.wet.attrs),
         'wet_u': xr.DataArray(og['wet_u'].values, dims=("yh", "xq",), attrs=og.wet_u.attrs),
         'wet_v': xr.DataArray(og['wet_v'].values, dims=("yq", "xh",), attrs=og.wet_v.attrs),
@@ -193,15 +225,27 @@ def add_grid_coords(ds, og):
     # so that volume-weighting is available downstream (added in v1.3.0).
     if ("thkcello" not in ds) and ("volcello" in ds) and ("areacello" in ds):
         ds['thkcello'] = ds['volcello']/ds['areacello']
+        # The vertical cell method has to name the dataset's *own* Z coordinate; it
+        # was hard-coded to `z_l`, which is wrong (and a KeyError waiting to happen
+        # in `remap_vertical_coord`) on the `zl` and `rho2_l` streams.
+        zdim = next(
+            (d for d in ["z_l", "zl", "rho2_l", "sigma2_l"] if d in ds['volcello'].dims),
+            "z_l"
+        )
         ds['thkcello'].attrs = {
             'long_name': 'Cell Thickness',
             'units': 'm',
-            'cell_methods': 'area:mean z_l:sum yh:mean xh:mean time: mean',
+            'cell_methods': f'area:mean {zdim}:sum yh:mean xh:mean time: mean',
             'cell_measures': 'volume: volcello area: areacello',
             'time_avg_info': 'average_T1,average_T2,average_DT',
             'standard_name': 'cell_thickness'
         }
-        
+        append_provenance(ds['thkcello'], (
+            "Derived by CM4Xutils as `volcello`/`areacello` because the model did not "
+            "archive `thkcello` in this diagnostic stream."
+        ))
+
+
     correct_cell_methods(ds)
 
     return ds
@@ -367,10 +411,14 @@ def add_sigma2_coords(ds):
             "long_name": "Potential Density referenced to 2000 dbar (minus 1000 kg/m3)",
             "units": "kg m-3",
             "cell_methods": "area:mean z_l:mean yh:mean xh:mean time:mean",
-            "volume": "volcello",
-            "area": "areacello",
+            # `volume`/`area` are not CF attributes; `cell_measures` is. `volcello`
+            # is dropped from this product, so only `areacello` is named.
+            "cell_measures": "area: areacello",
             "time_avg_info": "average_T1,average_T2,average_DT",
             "equation_of_state": "wright97-reduced (xeos; MOM6 EQN_OF_STATE=WRIGHT)",
+            "provenance": (
+                "Computed offline by CM4Xutils from the monthly-mean `thetao` and `so` with the MOM6 Wright (1997) reduced-range equation of state via xeos, matching the CM4X model configuration EQN_OF_STATE='WRIGHT'. It is therefore the model's own density to ~1e-12 kg m-3, but evaluated on monthly-mean state, so it is not identical to the instantaneous density the model used online."
+            ),
             "description": (
                 "Computed offline with the MOM6 Wright (1997) reduced-range equation of "
                 "state via xeos (wright97-reduced), matching the CM4X model configuration "
@@ -384,9 +432,11 @@ def add_sigma2_coords(ds):
             "long_name": "Potential Density referenced to 2000 dbar (minus 1000 kg/m3)",
             "units": "kg m-3",
             "cell_methods": "area:mean z_l:mean yh:mean xh:mean time:point",
-            "volume": "volcello",
-            "area": "areacello",
+            "cell_measures": "area: areacello",
             "equation_of_state": "wright97-reduced (xeos; MOM6 EQN_OF_STATE=WRIGHT)",
+            "provenance": (
+                "Computed offline by CM4Xutils from the snapshot `thetao` and `so` with the MOM6 Wright (1997) reduced-range equation of state via xeos, matching the CM4X model configuration EQN_OF_STATE='WRIGHT'. It is therefore the model's own density to ~1e-12 kg m-3, but evaluated on snapshot state, so it is not identical to the instantaneous density the model used online."
+            ),
             "description": (
                 "Computed offline with the MOM6 Wright (1997) reduced-range equation of "
                 "state via xeos (wright97-reduced), matching the CM4X model configuration "
@@ -399,21 +449,23 @@ def add_sigma2_coords(ds):
     return ds
 
 def rho2_transports_to_sigma2(ds_rho2, sigma2_l, sigma2_i):
-    """Relabel native `rho2`-layer transports onto the padded 76-layer `sigma2` grid.
+    """Relabel online-remapped `rho2`-layer transports onto the padded 76-layer `sigma2` grid.
 
     MOM6 archives the layer-integrated mass transports `umo`/`vmo` (and `thkcello`)
     directly in potential-density (`rho2`) coordinates in the `ocean_month_rho2` pp
-    output, where `sigma2 = rho2 - 1000`. These native 74 `rho2` layers are exactly the
-    interior of the 76-layer target `sigma2` grid built by `add_sigma2_coords` (which
-    pads one extra layer at each end). We therefore swap the vertical dimension to
-    `sigma2_l`, zero-pad one layer at each end (no transport exists outside the diagnostic
-    density range), and assign the target coordinates. No floating-point coordinate
-    matching and no offline vertical remapping is performed -- these transports are the
-    model's own online density-binned diagnostics.
+    output, where `sigma2 = rho2 - 1000`. Density is *not* the model's native vertical
+    coordinate: `ocean_month_rho2` is itself a remapping, but one performed online by
+    the model at every timestep using the instantaneous density, then time-averaged.
+    Those 74 `rho2` layers are exactly the interior of the 76-layer target `sigma2` grid
+    built by `add_sigma2_coords` (which pads one extra layer at each end). We therefore
+    swap the vertical dimension to `sigma2_l`, zero-pad one layer at each end (no
+    transport exists outside the diagnostic density range), and assign the target
+    coordinates. No floating-point coordinate matching and no *offline* vertical
+    remapping is performed here.
 
     Parameters
     ----------
-    ds_rho2 : `xr.Dataset` on the native `rho2_l` coordinate (e.g. from
+    ds_rho2 : `xr.Dataset` on the `rho2_l` coordinate (e.g. from
         `load_rho2_transports` / `load_rho2_transports_ds`).
     sigma2_l : `xr.DataArray` of the 76 target layer centers (from a dataset that has been
         passed through `add_sigma2_coords`).
@@ -423,11 +475,11 @@ def rho2_transports_to_sigma2(ds_rho2, sigma2_l, sigma2_i):
     -------
     ds : `xr.Dataset` with the transports relabeled onto the `sigma2_l` coordinate.
     """
-    n_native = ds_rho2.sizes["rho2_l"]
+    n_rho2 = ds_rho2.sizes["rho2_l"]
     n_interior = sigma2_l.sizes["sigma2_l"] - 2
-    if n_native != n_interior:
+    if n_rho2 != n_interior:
         raise ValueError(
-            f"Native rho2 diagnostic has {n_native} layers but the target sigma2 grid "
+            f"The rho2 diagnostic has {n_rho2} layers but the target sigma2 grid "
             f"has {n_interior} interior layers; they must match to relabel without "
             f"remapping."
         )
@@ -450,15 +502,45 @@ def rho2_transports_to_sigma2(ds_rho2, sigma2_l, sigma2_i):
                 cm["sigma2_l"] = cm.pop("rho2_l")
                 ds[v].attrs["cell_methods"] = stringify_cell_methods_dict(cm)
 
+    for v in ds.data_vars:
+        append_provenance(ds[v], (
+            "Remapped into potential-density (`rho2`) layers ONLINE by MOM6, at every "
+            "model timestep and using the model's instantaneous density, then "
+            "time-averaged over the month and archived as the `ocean_month_rho2` "
+            "diagnostic; mass is therefore conserved exactly within each density "
+            "layer. No offline vertical remapping was applied by CM4Xutils: the layers "
+            "were only relabeled `rho2_l` -> `sigma2_l` (sigma2 = rho2 - 1000) and "
+            "zero-padded with the two expansion layers of the target sigma2 grid."
+        ))
+
     return ds
 
-def correct_cell_methods(ds):
-    """Correct cell methods for depth and wet mask coordinates.
+# MOM6 registers the parameterized-mesoscale-neutral-diffusion tendencies with
+# `x_cell_method='sum'` / `y_cell_method='sum'`, which contradicts their own units:
+# `opottemppmdiff` is W m-2 and `osaltpmdiff` is kg m-2 s-1, i.e. *per unit area*,
+# exactly like their dianeutral counterparts `opottempdiff`/`osaltdiff`, which MOM6
+# does register as `xh:mean yh:mean`. CMIP6 likewise specifies these variables with
+# `area: mean where sea`. Taken at face value the `sum` methods send them down
+# `horizontally_coarsen`'s wet-masked-sum path, which is meant only for `areacello`,
+# inflating them by roughly the number of sub-cells per coarse cell; on CM4Xp125 it
+# also excludes them from the 3D wet-mask correction in `make_wmt_grid`, which keys
+# on `xh:mean`/`yh:mean`.
+PMDIFF_CELL_METHOD_FIXES = {
+    "opottemppmdiff": ("area:sum", "area:mean"),
+    "osaltpmdiff": ("area:sum", "area:mean"),
+}
 
-    These static-file coordinates are missing (or carry incorrect) ``cell_methods``
-    attributes, so their coarsening behavior would otherwise be undefined. This
-    stamps the correct methods so `horizontally_coarsen` treats each one properly:
-    `wet`/`deptho` as tracer-cell means, `wet_u`/`wet_v` as face quantities.
+def correct_cell_methods(ds):
+    """Correct cell methods that the source files get wrong or omit.
+
+    Static-file coordinates (`wet`, `wet_u`, `wet_v`, `deptho`) are missing (or carry
+    incorrect) ``cell_methods``, so their coarsening behavior would otherwise be
+    undefined; this stamps the correct methods so `horizontally_coarsen` treats each
+    one properly: `wet`/`deptho` as tracer-cell means, `wet_u`/`wet_v` as face
+    quantities.
+
+    It also repairs the `opottemppmdiff`/`osaltpmdiff` sum-vs-mean contradiction
+    described above `PMDIFF_CELL_METHOD_FIXES`.
 
     Modifies `ds` in place (does not return a new dataset).
 
@@ -469,11 +551,71 @@ def correct_cell_methods(ds):
     def correct_cell_method(v, cell_methods):
         if v in list(ds.data_vars)+list(ds.coords):
             ds[v].attrs["cell_methods"] = cell_methods
-        
+
     correct_cell_method("wet", "xh:mean yh:mean time:point")
     correct_cell_method("wet_u", "xq:point yh:mean time:point")
     correct_cell_method("wet_v", "xh:mean yq:point time:point")
     correct_cell_method("deptho", "xh:mean yh:mean time:point")
+
+    for (v, (old_area, new_area)) in PMDIFF_CELL_METHOD_FIXES.items():
+        if (v in ds.data_vars) and ("cell_methods" in ds[v].attrs):
+            cm = parse_cell_methods(ds[v].attrs["cell_methods"])
+            if cm.get("area") == old_area.split(":")[1]:
+                cm["area"] = new_area.split(":")[1]
+                for d in ["xh", "yh"]:
+                    if cm.get(d) == "sum":
+                        cm[d] = "mean"
+                ds[v].attrs["cell_methods"] = stringify_cell_methods_dict(cm)
+                ds[v].attrs.setdefault(
+                    "cell_methods_note",
+                    "The archived diagnostic declares `area:sum xh:sum yh:sum`, which "
+                    "contradicts its per-area units; corrected to `mean` by CM4Xutils "
+                    "to match `opottempdiff`/`osaltdiff` and the CMIP6 specification."
+                )
+
+def prune_cell_measures(ds):
+    """Drop `cell_measures` entries that point at variables `ds` does not contain.
+
+    Almost every budget variable inherits ``cell_measures = "volume: volcello"`` from
+    the archived diagnostics, but `add_sigma2_coords` drops `volcello` (it is not
+    meaningful once the vertical coordinate is density, and the remapped `thkcello`
+    supersedes it). CF requires every named measure to resolve, either in the file or
+    via `external_variables`, so the surviving reference is invalid and points a
+    reader at something that is not there.
+
+    Where a variable is left with no measure at all but is on the tracer grid,
+    ``area: areacello`` is substituted, since `areacello` *is* in the file and is the
+    measure needed to turn an area-mean back into a cell integral.
+
+    Modifies `ds` in place.
+    """
+    present = set(ds.variables)
+    for v in ds.variables:
+        cm = ds[v].attrs.get("cell_measures")
+        if not cm:
+            continue
+        kept = [
+            f"{k}: {name}"
+            for (k, name) in (
+                tok.split(":") for tok in _split_cell_measures(cm)
+            )
+            if name in present
+        ]
+        # Only substitute the tracer-cell area for variables that actually live on
+        # the tracer grid -- `areacello` is not the measure of a u- or v-face.
+        on_tracer_grid = {"xh", "yh"} <= set(ds[v].dims)
+        if not kept and ("areacello" in present) and on_tracer_grid:
+            kept = ["area: areacello"]
+        if kept:
+            ds[v].attrs["cell_measures"] = " ".join(kept)
+        else:
+            ds[v].attrs.pop("cell_measures", None)
+    return ds
+
+def _split_cell_measures(s):
+    """Yield ``"<key>:<name>"`` tokens from a CF ``cell_measures`` string."""
+    tokens = replace_by_dict(s, {": ": ":", " :": ":", " : ": ":"}).split()
+    return [t for t in tokens if ":" in t]
 
 def replace_by_dict(s, d):
     """Apply multiple string replacements by looping through a dictionary"""

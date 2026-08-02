@@ -91,10 +91,32 @@ Intervals are always multiples of 5 (the pp files are 5-year chunks). Outputs la
 - `coarsen.py` — `horizontally_coarsen`: grid-aware horizontal coarsening.
 - `loading.py` — GFDL-specific loaders (`load_wmt_ds`, `load_wmt_grid`, `load_density`,
   `load_tracer`, `load_transient_tracers`) plus scenario/time alignment.
+- `metadata.py` — `finalize_metadata`: purely *descriptive* output metadata (`units`,
+  `long_name`, `standard_name`, `comment`, coordinate `axis`/`bounds`, dataset-level
+  CF/ACDD attributes). It never writes `cell_methods`/`cell_measures`, which the
+  pipeline dispatches on and which therefore live with the code that consumes them.
 
 The canonical pipeline (see `scripts/remap_functions.py`) is:
 `load_wmt_grid` → `add_sigma2_coords` → `remap_vertical_coord("sigma2", ...)` →
-`ds_to_grid` → `horizontally_coarsen` → `to_zarr`.
+`ds_to_grid` → `horizontally_coarsen` → `finalize_metadata` → `to_zarr`.
+
+### Per-variable provenance
+
+The dataset-level `provenance` attribute cannot describe this product accurately,
+because variables take different paths: `umo`/`vmo` from `ocean_month_rho2` were
+remapped into density layers **online** by the model, while everything else is remapped
+**offline** here from monthly means. So every step that transforms a variable appends a
+sentence to *that variable's* `provenance` attribute via
+`append_provenance(obj, sentence)` (grid_preprocess.py) — coarsening (with the factors
+and the weighting actually applied to that variable), offline vertical remapping, the
+online rho2→sigma2 relabel, surface-flux vertical expansion, `taux`/`tauy`
+interpolation, sea-ice regridding, ideal-age time interpolation, and every derived
+variable. Sentences append and are never de-duplicated.
+
+**Placement matters.** `horizontally_coarsen` and `remap_vertical_coord` both reassign
+`.attrs` wholesale near the end, so both collect sentences in a dict during their loops
+and stamp them *after* those reassignments. Anything written earlier is silently lost.
+Same reason `finalize_metadata` is called last, in the generation scripts.
 
 ### `cell_methods` is load-bearing metadata
 
@@ -173,12 +195,13 @@ sigma2 grid is the 74-layer coordinate in `data/sigma2_coords.nc`, which
 `add_sigma2_coords` loads and pads with one extra layer at each end to cover all
 plausible ocean densities.
 
-**Transports come from the native rho2 diagnostics where available (v2.0.0+).** MOM6
-accumulates the layer-integrated mass transports `umo`/`vmo` *online* into
-potential-density (`rho2`) layers in the `ocean_month_rho2` pp output, where they conserve
-mass exactly within each layer. The budget pipeline sources them from there:
-`load_rho2_transports` / `load_rho2_transports_ds` (loading.py) load the native
-transports, and `rho2_transports_to_sigma2` (grid_preprocess.py) relabels `rho2_l →
+**Transports come from the online-remapped rho2 diagnostics where available (v2.0.0+).**
+Density is *not* the model's native vertical coordinate — `ocean_month_rho2` is itself a
+remapping, but one MOM6 performs *online*, at every timestep and using the instantaneous
+density, accumulating the layer-integrated mass transports `umo`/`vmo` into
+potential-density (`rho2`) layers where they conserve mass exactly within each layer. The
+budget pipeline sources them from there: `load_rho2_transports` /
+`load_rho2_transports_ds` (loading.py) load the online-remapped transports, and `rho2_transports_to_sigma2` (grid_preprocess.py) relabels `rho2_l →
 sigma2_l` (`sigma2 = rho2 − 1000`) and zero-pads the two expansion layers onto the
 76-layer sigma2 grid — no offline vertical remapping. Because `ocean_month_rho2` is
 archived at *native* resolution (even for CM4Xp125, whose budget tendencies are on d2),
@@ -188,8 +211,8 @@ product's horizontal coordinates onto the coarsened transports before merging th
 
 **Not every model archives both transports.** CM4Xp125 saves both `umo` and `vmo` in
 `ocean_month_rho2`, but **CM4Xp25 saves only `vmo`** (no `umo`). `available_rho2_transports`
-/ `native_rho2_transport_vars` (loading.py) probe the filesystem, and
-`remap_budgets_to_sigma2_and_coarsen` only uses the native path when **both** `umo` and
+/ `online_rho2_transport_vars` (loading.py) probe the filesystem, and
+`remap_budgets_to_sigma2_and_coarsen` only uses the online path when **both** `umo` and
 `vmo` are present across every experiment in the interval (i.e. CM4Xp125). Otherwise
 (CM4Xp25) it falls back to the older offline z→sigma2 transport remap for both terms — via
 `itp_tracer_to_transports` (the v1.2.0 fix, returning NaN where either neighbor is dry),
@@ -210,19 +233,23 @@ geometric and never evaluates the EOS.) `cm4x_watermass` declares
 `xwmt`'s conservative/absolute default, reproduces the model's arithmetic. This shifts
 sigma2 by O(0.01–0.1 kg/m³) versus ≤v1.3.0 and matches the online density to ~1e-12 kg/m³.
 
-The two v2.0.0 changes are complementary: the native-transport path relabels the model's
+The two v2.0.0 changes are complementary: the online-transport path relabels the model's
 own `rho2` layers as sigma2, and this makes the offline sigma2 coordinate use the same
 equation of state that defined those layers.
 
 ## Versioning and provenance
 
 `CM4Xutils/version.py` holds the package version; it is stamped into the `provenance`
-attribute of every coarsened/remapped dataset. The generation scripts *separately* stamp
-`ds.attrs["version"]` and `ds.attrs["version_notes"]` describing the dataset release.
+attribute of every coarsened/remapped dataset. `finalize_metadata` writes it once more
+as the machine-readable `product_version` (bare semver) plus `source_software`; the
+generation scripts supply only the prose `version_notes`. This replaces the older
+hand-formatted `ds.attrs["version"] = f"v{__version__}"`, which restated the same
+number in a second format — stores written before v2.0.0 carry `version`, not
+`product_version`.
 
 When a change alters numerical output (which most bug fixes here do — see the git log:
 d2 coarsening, area masks, boundary conditions, transport interpolation), bump the
-package version, update the dataset `version`/`version_notes` strings in
+package version, update the `version_notes` string in
 `scripts/coarsen_sigma2_*.py`, and regenerate. Older buggy outputs are kept in parallel
 directories (`data/coarsened_d2_bug/`, `data/coarsened_incorrect_wetmask/`,
 `data/coarsened_nanbugged/`, …) for comparison — don't delete these.
@@ -244,7 +271,8 @@ staged output.
 
 - Datasets in `data/coarsened/` predate v2.0.0: they were written without the `thkcello`
   that `add_grid_coords` derives from `volcello/areacello`, and with `umo`/`vmo` derived by
-  the old offline z→sigma2 remap rather than the native `ocean_month_rho2` diagnostics
+  the old offline z→sigma2 remap rather than the online-remapped `ocean_month_rho2`
+  diagnostics
   (v2.0.0+). They need regeneration. Both `scripts/coarsen_sigma2_*.py` now derive the
   dataset `version` attribute from `CM4Xutils/version.py`, so it can no longer drift from
   the package version the way the old hard-coded strings did.
