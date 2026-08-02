@@ -73,6 +73,26 @@ def cm4x_watermass(grid):
     return xwmt.WaterMass(grid, eos=CM4X_EOS, t_var="potential", s_var="practical")
 
 
+def _restore_coord_attrs(ds, c_attrs):
+    """Re-attach coordinate attributes that xgcm/xarray operations dropped.
+
+    Only keys that are *missing* from the current attributes are restored, so
+    attributes deliberately (re)written downstream -- e.g. the corrected
+    ``cell_methods`` from `correct_cell_methods` -- always win. Coordinates that no
+    longer exist on `ds` are skipped rather than raising.
+
+    Parameters
+    ----------
+    ds : `xr.Dataset` to patch in place
+    c_attrs : dict, coord name -> attribute dict captured before the operation
+    """
+    for (c, a) in c_attrs.items():
+        if c not in ds.coords:
+            continue
+        for (k, v) in a.items():
+            ds.coords[c].attrs.setdefault(k, v)
+
+
 # The three loaders below stamp the same human-readable experiment description
 # onto their output; keep it in one place so it cannot drift between them.
 def _experiment_description(model):
@@ -743,7 +763,14 @@ def load_tracer(odiv, tracer, time="*"):
                 pp, ppname, out, local, str(int(time[:-1]) - 5).zfill(4) + "*", tracer,
                 dmget=True
             ).isel(time=np.arange(5, 10, 1))
-  
+    else:
+        # Previously fell through with `ds` unbound, raising an opaque
+        # UnboundLocalError further down.
+        raise ValueError(
+            f"Don't know how to slice a single interval out of pp chunking {local!r} "
+            f"for {ppname}; only 'ts/*/5yr' and 'ts/annual/10yr' are handled."
+        )
+
     ds = chunk_dataset(ds, {"time":1, "z_l":-1})
     
     return ds
@@ -795,13 +822,7 @@ def load_density(odiv, time="*"):
     wm_averages = cm4x_watermass(xgcm.Grid(ds[["thetao", "so", "thkcello", "z_i"]], **wm_kwargs))
     ds["sigma2"] = wm_averages.get_density("sigma2")
 
-    for (c,a) in c_attrs.items():
-        if not hasattr(ds.coords[c], 'attrs'):
-            ds.coords[c].attrs = a
-        else:
-            for (k,v) in a.items():
-                if k not in ds.coords[c].attrs.keys():
-                    ds.coords[c].attrs[k] = v
+    _restore_coord_attrs(ds, c_attrs)
 
     correct_cell_methods(ds)
 
@@ -839,13 +860,7 @@ def load_density_annual(odiv, time="*"):
     wm_averages = cm4x_watermass(xgcm.Grid(ds[["thetao", "so", "thkcello", "zi"]], **wm_kwargs))
     ds["sigma2"] = wm_averages.get_density("sigma2")
 
-    for (c,a) in c_attrs.items():
-        if not hasattr(ds.coords[c], 'attrs'):
-            ds.coords[c].attrs = a
-        else:
-            for (k,v) in a.items():
-                if k not in ds.coords[c].attrs.keys():
-                    ds.coords[c].attrs[k] = v
+    _restore_coord_attrs(ds, c_attrs)
 
     correct_cell_methods(ds)
 
@@ -1118,13 +1133,7 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
     wm_snapshots = cm4x_watermass(xgcm.Grid(snapshot_state_vars.rename(rename_vardict), **wm_kwargs))
     grid._ds["sigma2_bounds"] = wm_snapshots.get_density("sigma2")
 
-    for (c,a) in c_attrs.items():
-        if not hasattr(grid._ds.coords[c], 'attrs'):
-            grid._ds.coords[c].attrs = a
-        else:
-            for (k,v) in a.items():
-                if k not in grid._ds.coords[c].attrs.keys():
-                    grid._ds.coords[c].attrs[k] = v
+    _restore_coord_attrs(grid._ds, c_attrs)
     
     return grid
 

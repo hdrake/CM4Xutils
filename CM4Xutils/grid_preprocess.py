@@ -149,9 +149,10 @@ def add_grid_coords(ds, og):
     ds : `xr.Dataset` containing both CM4X diagnostics and coordinates
     """
     
-    og['deptho'] = (
-        og['deptho'].where(~np.isnan(og['deptho']), 0.)
-    )
+    # Land cells carry NaN depth in the static file; treat them as zero depth.
+    # Computed into a local rather than written back into `og`, which several
+    # callers reuse after this call.
+    deptho = og['deptho'].where(~np.isnan(og['deptho']), 0.)
 
     if all([c in og for c in ["dxCv", "dyCu"]]):
         # add velocity face widths to calculate distances along the section
@@ -178,7 +179,7 @@ def add_grid_coords(ds, og):
         'geolat_v': xr.DataArray(og['geolat_v'].values, dims=("yq", "xh",), attrs=og.geolat_v.attrs),
         'geolon_c': xr.DataArray(og['geolon_c'].values, dims=("yq", "xq",), attrs=og.geolon_c.attrs),
         'geolat_c': xr.DataArray(og['geolat_c'].values, dims=("yq", "xq",), attrs=og.geolat_c.attrs),
-        'deptho':   xr.DataArray(og['deptho'].values, dims=("yh", "xh",), attrs=og.deptho.attrs),
+        'deptho':   xr.DataArray(deptho.values, dims=("yh", "xh",), attrs=og.deptho.attrs),
         'wet':   xr.DataArray(og['wet'].values,   dims=("yh", "xh",), attrs=og.wet.attrs),
         'wet_u': xr.DataArray(og['wet_u'].values, dims=("yh", "xq",), attrs=og.wet_u.attrs),
         'wet_v': xr.DataArray(og['wet_v'].values, dims=("yq", "xh",), attrs=og.wet_v.attrs),

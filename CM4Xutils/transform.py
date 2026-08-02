@@ -81,9 +81,16 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
         [v for v in ["thkcello", "thkcello_bounds"] if v in ds.data_vars] +
         [v for v in ds.data_vars if "thkcello" not in v]
     )
+    # `{coord}` itself is excluded: it *defines* the target bins, so remapping it
+    # would just return (approximately) the bin centers `{coord}_l`. `umo`/`vmo` are
+    # excluded here and handled separately below, because they live on cell faces.
+    # NOTE the asymmetry: `{coord}_bounds` (e.g. `sigma2_bounds`) is *not* excluded,
+    # so the snapshot density survives into the output while the time-mean `sigma2`
+    # does not. That is long-standing behavior and is left alone here because
+    # changing it would add/remove a variable from the released product.
     for v in data_vars:
         if (
-            (v not in [f"{coord}", "umo", "vmo"]) & # these already covered
+            (v not in [f"{coord}", "umo", "vmo"]) &
             all([d in ds[v].dims for d in ["xh", "yh", Z_l]]) # on tracer grid
         ):
             suffix = "_bounds" if "_bounds" in v else ""

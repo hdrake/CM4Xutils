@@ -42,6 +42,11 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
         if (e in ds.coords)
     ]
 
+    # The tracer-cell wet mask is the same for every variable, so build it once
+    # rather than re-deriving (and re-persisting) it on each loop iteration.
+    partially_wet_mask = (ds.wet.fillna(0.) > 0.).persist()
+    wet_pos = ds.wet.where(ds.wet > 0.).persist()
+
     var_list = list(ds.data_vars) + coord_vars
     for v in var_list:
 
@@ -50,7 +55,7 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
         if "cell_methods" not in da.attrs:
             print(f"Skipping variable {v} because `cell_methods` attribute not defined.")
             continue
-            
+
         cell_method = parse_cell_methods(da.cell_methods)
         try:
             dim_names = {
@@ -60,9 +65,6 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
         except:
             print(f"Skipping {v} because independent of 'X' and 'Y' dims.")
             continue
-
-        partially_wet_mask = (ds.wet.fillna(0.) > 0.).persist()
-        wet_pos = ds.wet.where(ds.wet > 0.).persist()
 
         # Dispatch on the pair of X/Y cell methods. Three top-level cases:
         #   (mean, mean) -> weighted average (Case A below),
@@ -142,6 +144,7 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
             da.attrs = attrs
             
         else:
+            skip_var = False
             # First check if we need to take an average in one of the directions,
             # because we need to use the cell widths at full resolution
             if any([cell_method[dim_var] == "mean" for dim_var in dim_names.values()]):
@@ -183,28 +186,38 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
                             da = (da_weighted_integral / weight_integral.where(weight_integral != 0.)).round(5)
                             da.attrs = attrs
                         else:
-                            print(f"Skipping {v} because cell method is mean in {dim_var}.")
-                            continue
+                            # Only `wet_u`/`wet_v` have a defined face-width weighting
+                            # for a mixed mean/point (or mean/sum) method, so anything
+                            # else has to be dropped rather than partially coarsened.
+                            # NOTE: this used to `continue` the *inner* loop, which left
+                            # the variable in the output with its mean-axis uncoarsened
+                            # despite the printed message. No CM4X variable currently
+                            # reaches this branch, so making the skip real does not
+                            # change any released output.
+                            print(
+                                f"Skipping {v} because cell method is mean in {dim_var} "
+                                f"but it is not one of the face masks (wet_u, wet_v)."
+                            )
+                            skip_var = True
+                            break
 
             # Second check if we need to take a sum in either direction
             elif any([cell_method[dim_var] == "sum" for dim_var in dim_names.values()]):
                 for (dim_name, dim_var) in dim_names.items():
                     cdim = {dim_var:dim[dim_name]}
                     if cell_method[dim_var] == "sum":
+                        # Summing along one axis of a face quantity (e.g. `umo` along
+                        # Y, `vmo` along X) is masked by the *face* wet mask, not the
+                        # tracer-cell one.
                         if dim_name == "X":
-                            partially_wet_mask = ds.wet_v.fillna(0.) > 0.
-                            weight = xr.where(
-                                partially_wet_mask,
-                                partially_wet_mask.astype("float"),
-                                0.
-                            )
+                            face_wet_mask = ds.wet_v.fillna(0.) > 0.
                         elif dim_name == "Y":
-                            partially_wet_mask = ds.wet_u.fillna(0.) > 0.
-                            weight = xr.where(
-                                partially_wet_mask,
-                                partially_wet_mask.astype("float"),
-                                0.
-                            )
+                            face_wet_mask = ds.wet_u.fillna(0.) > 0.
+                        weight = xr.where(
+                            face_wet_mask,
+                            face_wet_mask.astype("float"),
+                            0.
+                        )
                         attrs = da.attrs
                         da = (da*weight).fillna(0.).coarsen(dim=cdim).sum()
                         da = xr.where(
@@ -214,6 +227,9 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
                         )
                         da = da if (v in coord_vars) else da.where(da!=0.)
                         da.attrs = attrs
+
+            if skip_var:
+                continue
 
             # Finally, check if we need to do just simple subsampling
             for (dim_name, dim_var) in dim_names.items():
