@@ -245,8 +245,9 @@ staged output.
 - Datasets in `data/coarsened/` predate v2.0.0: they were written without the `thkcello`
   that `add_grid_coords` derives from `volcello/areacello`, and with `umo`/`vmo` derived by
   the old offline z→sigma2 remap rather than the native `ocean_month_rho2` diagnostics
-  (v2.0.0+). They need regeneration; `scripts/coarsen_sigma2_budgets.py` now stamps
-  `v2.0.0`, but `scripts/coarsen_sigma2_tracers.py` may still read an older string.
+  (v2.0.0+). They need regeneration. Both `scripts/coarsen_sigma2_*.py` now derive the
+  dataset `version` attribute from `CM4Xutils/version.py`, so it can no longer drift from
+  the package version the way the old hard-coded strings did.
 - **Never call `Dataset.chunk` directly — use `chunk_dataset(ds, chunks)`.** How xarray
   treats a chunk dict that does not name every dim of a variable is version-dependent: in
   xarray >= 2026.7.0, rechunking a dask-backed *cftime* variable that way raises
@@ -257,14 +258,6 @@ staged output.
   `chunk_dataset` (grid_preprocess.py) completes the dict against `ds.dims` first, leaving
   unnamed dims at their current chunking. `DataArray.chunk` on float data is unaffected;
   only cftime arrays reach that code path.
-- The existing per-worktree conda environments predate the `CM4Xutils_<name>` naming
-  convention and do not follow it, though each is correctly editable-installed against
-  its own worktree: `cm4xutils-xeos` → `xwmt-xeos-eos`, `CM4Xutils-rho2-transports` →
-  `rho2-native-transports`, `CM4Xutils-review` → `readability-review`. The base
-  `CM4Xutils` env is installed against the main checkout. Rename them when convenient.
-- This `CLAUDE.md` is untracked, so it exists only in the main checkout — worktrees do
-  not get a copy, and sessions started inside one will not load these instructions.
-  Track it, or copy it in, if that becomes a problem.
 - `CM4Xutils/.ipynb_checkpoints/` is untracked and gitignored. As of v1.3.0 its module
   copies are absorbed into the live modules, **except** `new_loading-checkpoint.py`, which
   is the only surviving copy of a removed `new_loading` module
