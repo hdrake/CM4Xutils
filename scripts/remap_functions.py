@@ -166,6 +166,13 @@ def remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year):
         (age.agessc >= 0) | np.isnan(age.agessc),
         0.
     )
+    append_provenance(age["agessc"], (
+        "Linearly interpolated in time from the archived annual means onto the "
+        "monthly-mean time axis of the other diagnostics, with linear extrapolation "
+        "beyond the first and last annual mean; negative ages produced by that "
+        "extrapolation in the first few months were clipped to zero. It is therefore "
+        "not a monthly mean of the model state, but an interpolant of annual means."
+    ))
     
     if model == "CM4Xp125":
         # Coarsen layer thickness and density to match "d2" resolution of ideal age output 

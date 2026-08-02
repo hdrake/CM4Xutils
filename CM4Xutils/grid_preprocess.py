@@ -27,6 +27,37 @@ from xgcm import Grid
 SIGMA2_MIN = -10.
 SIGMA2_MAX = 50.
 
+def append_provenance(obj, sentence):
+    """Append one processing sentence to an object's ``provenance`` attribute.
+
+    Every step of the pipeline that transforms a variable -- horizontal coarsening,
+    offline vertical remapping, the relabeling of the online-remapped `rho2`
+    transports, the vertical expansion of 2D surface fluxes, interpolation between
+    staggered grid positions, sea-ice regridding, time interpolation -- appends its
+    own sentence here. A variable's ``provenance`` therefore reads as the ordered
+    list of everything that was done to it, which the dataset-level ``provenance``
+    cannot express because different variables take different paths through the
+    pipeline (most obviously `umo`/`vmo`, which are remapped *online* by the model
+    while everything else is remapped offline here).
+
+    Existing text is appended to, never overwritten, and no de-duplication is done:
+    a variable coarsened twice (as CM4Xp125 surface fluxes are, once at load time to
+    reach the "d2" grid and once at the end) should say so twice, with each
+    coarsening factor.
+
+    Parameters
+    ----------
+    obj : `xr.DataArray` or `xr.Dataset`
+    sentence : str, a complete sentence describing one processing step
+
+    Returns
+    -------
+    obj : the same object, modified in place
+    """
+    existing = obj.attrs.get("provenance", "").strip()
+    obj.attrs["provenance"] = f"{existing} {sentence.strip()}".strip()
+    return obj
+
 def chunk_dataset(ds, chunks):
     """`ds.chunk(chunks)`, with every dimension of `ds` named explicitly.
 
@@ -202,7 +233,12 @@ def add_grid_coords(ds, og):
             'time_avg_info': 'average_T1,average_T2,average_DT',
             'standard_name': 'cell_thickness'
         }
-        
+        append_provenance(ds['thkcello'], (
+            "Derived by CM4Xutils as `volcello`/`areacello` because the model did not "
+            "archive `thkcello` in this diagnostic stream."
+        ))
+
+
     correct_cell_methods(ds)
 
     return ds
@@ -372,6 +408,9 @@ def add_sigma2_coords(ds):
             "area": "areacello",
             "time_avg_info": "average_T1,average_T2,average_DT",
             "equation_of_state": "wright97-reduced (xeos; MOM6 EQN_OF_STATE=WRIGHT)",
+            "provenance": (
+                "Computed offline by CM4Xutils from the monthly-mean `thetao` and `so` with the MOM6 Wright (1997) reduced-range equation of state via xeos, matching the CM4X model configuration EQN_OF_STATE='WRIGHT'. It is therefore the model's own density to ~1e-12 kg m-3, but evaluated on monthly-mean state, so it is not identical to the instantaneous density the model used online."
+            ),
             "description": (
                 "Computed offline with the MOM6 Wright (1997) reduced-range equation of "
                 "state via xeos (wright97-reduced), matching the CM4X model configuration "
@@ -388,6 +427,9 @@ def add_sigma2_coords(ds):
             "volume": "volcello",
             "area": "areacello",
             "equation_of_state": "wright97-reduced (xeos; MOM6 EQN_OF_STATE=WRIGHT)",
+            "provenance": (
+                "Computed offline by CM4Xutils from the snapshot `thetao` and `so` with the MOM6 Wright (1997) reduced-range equation of state via xeos, matching the CM4X model configuration EQN_OF_STATE='WRIGHT'. It is therefore the model's own density to ~1e-12 kg m-3, but evaluated on snapshot state, so it is not identical to the instantaneous density the model used online."
+            ),
             "description": (
                 "Computed offline with the MOM6 Wright (1997) reduced-range equation of "
                 "state via xeos (wright97-reduced), matching the CM4X model configuration "
@@ -452,6 +494,17 @@ def rho2_transports_to_sigma2(ds_rho2, sigma2_l, sigma2_i):
             if "rho2_l" in cm:
                 cm["sigma2_l"] = cm.pop("rho2_l")
                 ds[v].attrs["cell_methods"] = stringify_cell_methods_dict(cm)
+
+    for v in ds.data_vars:
+        append_provenance(ds[v], (
+            "Remapped into potential-density (`rho2`) layers ONLINE by MOM6, at every "
+            "model timestep and using the model's instantaneous density, then "
+            "time-averaged over the month and archived as the `ocean_month_rho2` "
+            "diagnostic; mass is therefore conserved exactly within each density "
+            "layer. No offline vertical remapping was applied by CM4Xutils: the layers "
+            "were only relabeled `rho2_l` -> `sigma2_l` (sigma2 = rho2 - 1000) and "
+            "zero-padded with the two expansion layers of the target sigma2 grid."
+        ))
 
     return ds
 

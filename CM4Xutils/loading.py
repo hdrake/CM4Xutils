@@ -267,6 +267,12 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
             'time_avg_info': 'average_T1,average_T2,average_DT',
             'units': 'W m-2'
         }
+        append_provenance(av_tend["rsdoabsorb"], (
+            "Derived by CM4Xutils as minus the vertical difference of the archived "
+            "downwelling shortwave flux `rsdo` across each layer's interfaces "
+            "(extended at the top and bottom), i.e. the shortwave energy absorbed "
+            "within the layer. Not an archived model diagnostic."
+        ))
     else:
         print(f"Missing `rsdo` diagnostic for {model}-{exp}")
     
@@ -293,9 +299,21 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     if 'taux' in hgrid._ds.data_vars:
         av_surf['taux'] = hgrid.interp(hgrid._ds['taux'].chunk({"xq":-1}), 'X', keep_attrs=True)
         av_surf['taux'].attrs['cell_methods'] = 'yh:mean xh:mean time:mean'
+        append_provenance(av_surf['taux'], (
+            "Interpolated from the zonal-velocity (Cu, `xq`) points onto the tracer "
+            "cell centers (`xh`) as the two-point average of the faces bounding each "
+            "cell in X (periodic in X). It is therefore no longer the value the model "
+            "applied at the u-points."
+        ))
     if 'tauy' in hgrid._ds.data_vars:
         av_surf['tauy'] = hgrid.interp(hgrid._ds['tauy'].chunk({"yq":-1}), 'Y', keep_attrs=True)
         av_surf['tauy'].attrs['cell_methods'] = 'yh:mean xh:mean time:mean'
+        append_provenance(av_surf['tauy'], (
+            "Interpolated from the meridional-velocity (Cv, `yq`) points onto the "
+            "tracer cell centers (`yh`) as the two-point average of the faces "
+            "bounding each cell in Y (edge values extended at the Y boundaries). It "
+            "is therefore no longer the value the model applied at the v-points."
+        ))
 
     # For CM4Xp125, surface fluxes are only available on native grid,
     # but 3D tendencies only available on d2 coarsened grid,
@@ -416,6 +434,12 @@ def expand_surface_fluxes(grid):
             attrs["cell_methods"] = "area:mean z_l:sum yh:mean xh:mean time: mean"
             attrs["long_name"] = f"Convergence of {attrs['long_name']}"
             grid._ds[v].attrs = attrs
+            append_provenance(grid._ds[v], (
+                "Recast from a 2D surface flux into a 3D layer convergence by "
+                "inserting the whole flux into the topmost model layer and setting "
+                "every deeper layer to zero, as `xwmb` expects boundary fluxes to be "
+                "supplied. Values are unchanged; only the vertical placement is new."
+            ))
 
 def _interval_load_flags(model, interval, test=False):
     """Determine which experiments and time patterns to load for a given interval.
@@ -906,7 +930,8 @@ def regrid_ice(ds, og, ig):
     if "xh_ice" in ds.coords:
         ds_ice = ds.drop_dims(["xh", "yh"])
         ds_ice = ds_ice.rename({"xh_ice":"xh", "yh_ice":"yh"})
-        if ds.xh_ice.size == 2*ds.xh.size:
+        refined = ds.xh_ice.size == 2*ds.xh.size
+        if refined:
             ds_ice = ds_ice.assign_coords({
                 "areacello": xr.DataArray(
                     ig.CELL_AREA.values, dims=("yh", "xh"), attrs=og.wet.attrs
@@ -928,6 +953,14 @@ def regrid_ice(ds, og, ig):
                 {"X":2, "Y":2},
                 skip_coords=True
             ).drop_vars(["areacello", "wet"])
+        for v in ds_ice.data_vars:
+            append_provenance(ds_ice[v], (
+                "Moved from the sea-ice model grid (`xh_ice`/`yh_ice`) onto the ocean "
+                "tracer grid (`xh`/`yh`)"
+                + (", which is 2x coarser, by the ice-cell-area-weighted 2x2 mean "
+                   "recorded above." if refined else
+                   ", which is the same grid; only the dimension names changed.")
+            ))
         ds = xr.merge([
             ds.drop_dims(["xh_ice", "yh_ice"]),
             ds_ice.assign_coords({"xh":ds.xh, "yh":ds.yh})
@@ -1100,6 +1133,16 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
             else:
                 ds["fsitherm"].data = fsitherm.data
             ds["prlq"].data = ds["RAIN"].data
+            append_provenance(ds["fsitherm"], (
+                "Recomputed by CM4Xutils as `prlq` - `RAIN`: the archived ocean `prlq` "
+                "lumps the sea-ice melt/freeze freshwater flux in with liquid "
+                "precipitation, so the sea-ice part is split back out here."
+            ))
+            append_provenance(ds["prlq"], (
+                "Replaced by CM4Xutils with the sea-ice model's `RAIN` diagnostic: the "
+                "archived ocean `prlq` also contained the sea-ice melt/freeze "
+                "freshwater flux, which has been moved to `fsitherm`."
+            ))
 
     # Construct 3D h_tendency from wfo if it does not exist
     if "boundary_forcing_h_tendency" not in grid._ds:
@@ -1116,6 +1159,14 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
                 'cell_measures': 'volume: volcello area: areacello',
                 'time_avg_info': 'average_T1,average_T2,average_DT'
             }
+            append_provenance(grid._ds["boundary_forcing_h_tendency"], (
+                "Derived by CM4Xutils, not archived by the model: the 2D surface "
+                "freshwater flux `wfo` [kg m-2 s-1] was inserted at the ocean surface "
+                "and differenced vertically to give a per-layer convergence, then "
+                "divided by the Boussinesq reference density RHO_0 = 1035 kg m-3 to "
+                "convert it to a thickness tendency [m s-1]. All of it therefore lands "
+                "in the topmost layer."
+            ))
     
     # Compute potential density variables
     coords = {'Z': grid.axes['Z'].coords}

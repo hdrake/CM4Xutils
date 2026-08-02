@@ -70,9 +70,20 @@ def remap_vertical_coord(coord, ds, grid, remap_transports=True):
     Z_i = grid.axes["Z"].coords["outer"]
     
     ds_trans = xr.Dataset(coords=ds.drop_dims([Z_l, Z_i]).coords, attrs=ds.attrs)
-    ds_trans.attrs["provenance"] = f"""Diagnostics have been conservatively remapped into monthly-mean
-{coord} coordinates by Henri F. Drake (hfdrake@uci.edu) using the
-CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). """
+    # Append rather than overwrite, and do not claim this of *every* variable: when
+    # the budget pipeline sources `umo`/`vmo` from `ocean_month_rho2` those were
+    # remapped online by the model, not offline here. Each variable's own
+    # `provenance` attribute records which of the two it actually went through.
+    append_provenance(ds_trans, f"""The diagnostics on the tracer grid have been
+conservatively remapped offline into monthly-mean {coord} layers -- i.e. binned using
+the monthly-mean {coord} field, not the model's instantaneous density -- by
+Henri F. Drake (hfdrake@uci.edu) using the CM4Xutils python package v{__version__}
+(https://github.com/hdrake/CM4Xutils). Variables merged in from the model's
+online-remapped density diagnostics are exempt; see each variable's own `provenance`.""")
+
+    # Per-variable sentences, applied after the attribute-restore loop at the end,
+    # which reassigns `.attrs` wholesale from the source dataset.
+    provenance = {}
 
     # Process thkcello (and its snapshot) first: intensive variables are
     # normalized by the *remapped* thickness below, so it must already exist
@@ -116,6 +127,28 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
                 h = ds_trans[f"thkcello{suffix}"].fillna(0.)
                 ds_trans[v] = (ds_trans[v]/h).where(ds_trans[v]!=0.)
 
+            source = "monthly-mean" if suffix == "" else "snapshot"
+            if Z_cell_method == "mean":
+                provenance[v] = (
+                    f"Conservatively remapped offline from the `{Z_l}` (depth) "
+                    f"coordinate onto {source} `{coord}_l` layers: multiplied by "
+                    f"`thkcello{suffix}` to make it extensive, conservatively binned "
+                    f"using the {source} `{coord}{suffix}` field interpolated to the "
+                    f"`{Z_i}` interfaces, then divided by the remapped thickness. The "
+                    f"binning uses the {source} density, not the model's instantaneous "
+                    f"density, so it is an offline approximation of the model's own "
+                    f"online density binning."
+                )
+            else:
+                provenance[v] = (
+                    f"Conservatively remapped offline from the `{Z_l}` (depth) "
+                    f"coordinate onto {source} `{coord}_l` layers, binned using the "
+                    f"{source} `{coord}{suffix}` field interpolated to the `{Z_i}` "
+                    f"interfaces. The binning uses the {source} density, not the "
+                    f"model's instantaneous density, so it is an offline approximation "
+                    f"of the model's own online density binning."
+                )
+
     # Transports live on cell faces, not tracer centers, so the target density
     # must first be interpolated onto the u- and v-faces before remapping umo/vmo.
     if remap_transports and all([v in ds.data_vars for v in ["umo", "vmo"]]):
@@ -151,6 +184,18 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
             ds[f"{coord}_v"].where(ds[f"{coord}_v"])
         )
 
+        for (t, face) in [("umo", "u"), ("vmo", "v")]:
+            provenance[t] = (
+                f"Conservatively remapped offline from the `{Z_l}` (depth) coordinate "
+                f"onto monthly-mean `{coord}_l` layers. Because the transport lives on "
+                f"cell faces, the monthly-mean `{coord}` was first averaged from the "
+                f"two adjacent tracer cells onto each {face}-face (NaN where either "
+                f"neighbour is dry) and interpolated to the `{Z_i}` interfaces. This is "
+                f"an offline approximation of the model's own online density binning; "
+                f"it does not conserve mass within a density layer the way the "
+                f"online-remapped `ocean_month_rho2` transports do."
+            )
+
     # Re-assign variable attributes, rewriting the vertical cell method key from
     # the source axis (e.g. "z_l") to the new target axis (e.g. "sigma2_l").
     for v in ds_trans.data_vars:
@@ -159,6 +204,11 @@ CM4Xutils python package v{__version__} (https://github.com/hdrake/CM4Xutils). "
         ds_trans[v].attrs["cell_methods"] = stringify_cell_methods_dict(
             {k.replace(Z_l, f"{coord}_l"):v for (k,v) in cell_methods_dict.items()}
         )
+
+    # After the wholesale `.attrs` restore above, so it is not dropped.
+    for (v, sentence) in provenance.items():
+        if v in ds_trans.data_vars:
+            append_provenance(ds_trans[v], sentence)
 
     # Carry over coordinate attributes that the transform dropped.
     for c in ds_trans.coords:
