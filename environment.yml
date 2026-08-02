@@ -6,3 +6,10 @@ dependencies:
   - jupyterlab
   - matplotlib
   - pip
+  - pip:
+    # Needed only to run the example water-mass-budget notebooks in `examples/`; the
+    # CM4Xutils library itself does not import xwmb, so it is not a package dependency.
+    # NOTE: xwmb 0.6.0 is not yet compatible with xbudget >= 0.7.0 (it calls the removed
+    # top-level xbudget.aggregate), so the WMB notebooks will not run until xwmb is
+    # updated upstream. Re-pin to that release/commit once available.
+    - git+https://github.com/hdrake/xwmb.git@main

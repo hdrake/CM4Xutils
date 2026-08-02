@@ -6,7 +6,7 @@ authors = [
 ]
 description = "A package for loading and manipulating CM4X output"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
@@ -15,11 +15,18 @@ classifiers = [
 dependencies = [
     "netcdf4",
     "bottleneck",
-    "xgcm",
+    "xgcm >= 0.10.0",
     "cftime",
     "nc-time-axis",
-    "xwmt >= 0.1.0",
-    "xwmb >= 0.5.0",
+    "gsw >= 3.4.0",
+    # xeos supplies the equation of state used to compute sigma2 offline. We use its
+    # MOM6 Wright (1997) reduced-range EOS to match the CM4X model configuration
+    # (EQN_OF_STATE="WRIGHT") instead of gsw/TEOS-10. See CM4Xutils/loading.py:CM4X_EOS.
+    "xeos[teos10] >= 0.1.0",
+    "xbudget >= 0.7.0",
+    # The released xwmt 0.2.x line predates the configurable `eos=` parameter and pins
+    # xgcm < 0.10 / xbudget < 0.7, so we track upstream main until the next release.
+    "xwmt @ git+https://github.com/NOAA-GFDL/xwmt.git@main",
     "doralite @ git+https://github.com/hdrake/doralite.git@master",
     "intake-esm",
     "gfdl_utils @ git+https://github.com/hdrake/gfdl_utils.git@master",

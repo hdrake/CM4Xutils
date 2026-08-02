@@ -16,6 +16,16 @@ import xarray as xr
 import numpy as np
 from xgcm import Grid
 
+# Bracketing interfaces of the expanded sigma2 grid built by `add_sigma2_coords`
+# [kg m-3]. The archived CM4X coordinate spans sigma2 = [-3, 39]; one interface is
+# added below and above that range so the conservative remapping has somewhere to
+# put water outside it instead of spilling mass past the outermost layers. Kept
+# just wide enough to cover any plausible ocean density -- widening them only
+# stretches the two expansion layers and pushes their nominal centers away from
+# any density the ocean actually attains.
+SIGMA2_MIN = -10.
+SIGMA2_MAX = 50.
+
 def fix_geo_coords(og, sg):
     """Fix geographical coordinates from static file with supergrid
 
@@ -214,13 +224,13 @@ def ds_to_grid(ds, Zprefix=None):
     else:
         metrics = {}
     
-    boundary = {"X":"periodic", "Y":"extend", "Z":"extend"}
-    
+    padding = {"X":"periodic", "Y":"extend", "Z":"extend"}
+
     return Grid(
         ds,
         coords=coords,
         metrics=metrics,
-        boundary=boundary,
+        padding=padding,
         autoparse_metadata=False
     )
 
@@ -240,25 +250,25 @@ def add_sigma2_coords(ds):
         dirname = os.path.dirname(__file__)
         filename = os.path.join(dirname, "../data/sigma2_coords.nc")
         sigma2_coords = xr.open_dataset(filename)
-        # Pad one extra interface at each end (shifted by +/-1000 kg/m3) so that
+        # Pad one extra interface at each end (at SIGMA2_MIN / SIGMA2_MAX) so that
         # the target grid brackets every plausible ocean density and the
         # conservative remapping never spills mass past the outermost layers.
         sigma2_coords_expanded = xr.Dataset(
             coords={
                 "sigma2_i": xr.DataArray(
                     np.concatenate((
-                        [sigma2_coords.sigma2_i.values[0]-1000],
+                        [SIGMA2_MIN],
                         sigma2_coords.sigma2_i.values,
-                        [sigma2_coords.sigma2_i.values[-1]+1000]
+                        [SIGMA2_MAX]
                     )),
                     dims=("sigma2_i",),
                     attrs=sigma2_coords.sigma2_i.attrs
                 ),
                 "rho2_i": xr.DataArray(
                     np.concatenate((
-                        [sigma2_coords.rho2_i.values[0]-1000],
+                        [SIGMA2_MIN + 1000.],
                         sigma2_coords.rho2_i.values,
-                        [sigma2_coords.rho2_i.values[-1]+1000]
+                        [SIGMA2_MAX + 1000.]
                     )),
                     dims=("sigma2_i",),
                     attrs=sigma2_coords.rho2_i.attrs
@@ -315,7 +325,14 @@ def add_sigma2_coords(ds):
             "volume": "volcello",
             "area": "areacello",
             "time_avg_info": "average_T1,average_T2,average_DT",
-            "description": "Computed offline using the gsw python package implementation of TEOS10.",
+            "equation_of_state": "wright97-reduced (xeos; MOM6 EQN_OF_STATE=WRIGHT)",
+            "description": (
+                "Computed offline with the MOM6 Wright (1997) reduced-range equation of "
+                "state via xeos (wright97-reduced), matching the CM4X model configuration "
+                "EQN_OF_STATE='WRIGHT' to machine precision (identical coefficients and "
+                "density formula; differs from MOM6's legacy kernel only by floating-point "
+                "addition associativity, ~1e-12 kg/m3)."
+            ),
         }
     if "sigma2_bounds" in ds.data_vars:
         ds.sigma2_bounds.attrs = {
@@ -324,7 +341,14 @@ def add_sigma2_coords(ds):
             "cell_methods": "area:mean z_l:mean yh:mean xh:mean time:point",
             "volume": "volcello",
             "area": "areacello",
-            "description": "Computed offline using the gsw python package implementation of TEOS10."
+            "equation_of_state": "wright97-reduced (xeos; MOM6 EQN_OF_STATE=WRIGHT)",
+            "description": (
+                "Computed offline with the MOM6 Wright (1997) reduced-range equation of "
+                "state via xeos (wright97-reduced), matching the CM4X model configuration "
+                "EQN_OF_STATE='WRIGHT' to machine precision (identical coefficients and "
+                "density formula; differs from MOM6's legacy kernel only by floating-point "
+                "addition associativity, ~1e-12 kg/m3)."
+            ),
         }
 
     return ds
