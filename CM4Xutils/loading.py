@@ -398,6 +398,19 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
         **{'time':'time_bounds'},
         **{v:f"{v}_bounds" for v in snapshots.data_vars}
     })
+    # The snapshot stream inherits `time: mean` from the archived files even though
+    # these are instantaneous values, which mislabels every `*_bounds` variable in
+    # the released product as a time average. Only the X/Y/Z parts of `cell_methods`
+    # are dispatched on, so correcting the time part changes no numbers.
+    for v in snapshots.data_vars:
+        if "cell_methods" in snapshots[v].attrs:
+            cm = parse_cell_methods(snapshots[v].attrs["cell_methods"])
+            if cm.get("time") == "mean":
+                cm["time"] = "point"
+                snapshots[v].attrs["cell_methods"] = stringify_cell_methods_dict(cm)
+        # `time_avg_info` points at averaging-period variables that do not apply to
+        # an instantaneous field.
+        snapshots[v].attrs.pop("time_avg_info", None)
 
     ds_merged = xr.merge([averages, snapshots])
     return ds_merged
@@ -933,8 +946,19 @@ def regrid_ice(ds, og, ig):
         refined = ds.xh_ice.size == 2*ds.xh.size
         if refined:
             ds_ice = ds_ice.assign_coords({
+                # Copy-paste fix: this took `og.wet.attrs` (the land mask's), which
+                # gave the ice-cell area a mask's `long_name` and, more importantly,
+                # `wet`'s mean-mean `cell_methods` instead of an area's sum-sum ones.
+                # It only ever fed `grid_ice`'s metric (by value) and is dropped
+                # immediately afterwards, so no ice field's numbers depended on it.
                 "areacello": xr.DataArray(
-                    ig.CELL_AREA.values, dims=("yh", "xh"), attrs=og.wet.attrs
+                    ig.CELL_AREA.values, dims=("yh", "xh"),
+                    attrs={
+                        "long_name": "Ocean Grid-Cell Area",
+                        "units": "m2",
+                        "standard_name": "cell_area",
+                        "cell_methods": "area:sum yh:sum xh:sum time:point",
+                    },
                 ),
                 "wet": xr.DataArray(
                     og.wet.values, dims=("yh", "xh"), attrs=og.wet.attrs
@@ -1061,10 +1085,15 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
             
             ds_coarsened_wet_mask = ds_coarsened_wet_mask.assign_coords(ds.coords)
 
-            mms_cell_methods = ["xh:mean", "yh:mean", "z_l:sum"]
+            # Parse rather than substring-match: a substring test silently depends
+            # on the exact spelling ("xh:mean" vs "xh: mean") of a string this
+            # package also rewrites, and a miss here silently skips the wet-mask
+            # correction for that variable.
+            mms_cell_methods = {"xh": "mean", "yh": "mean", "z_l": "sum"}
             for k,v in ds.data_vars.items():
                 if "cell_methods" in v.attrs:
-                    if all([d in v.attrs["cell_methods"] for d in mms_cell_methods]):
+                    cm = parse_cell_methods(v.attrs["cell_methods"])
+                    if all([cm.get(d) == m for (d, m) in mms_cell_methods.items()]):
                         ds[k] = xr.DataArray(
                             ds[k] * ds_coarsened_wet_mask.wet_mask,
                             attrs = ds[k].attrs

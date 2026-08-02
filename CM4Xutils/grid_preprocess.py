@@ -225,10 +225,17 @@ def add_grid_coords(ds, og):
     # so that volume-weighting is available downstream (added in v1.3.0).
     if ("thkcello" not in ds) and ("volcello" in ds) and ("areacello" in ds):
         ds['thkcello'] = ds['volcello']/ds['areacello']
+        # The vertical cell method has to name the dataset's *own* Z coordinate; it
+        # was hard-coded to `z_l`, which is wrong (and a KeyError waiting to happen
+        # in `remap_vertical_coord`) on the `zl` and `rho2_l` streams.
+        zdim = next(
+            (d for d in ["z_l", "zl", "rho2_l", "sigma2_l"] if d in ds['volcello'].dims),
+            "z_l"
+        )
         ds['thkcello'].attrs = {
             'long_name': 'Cell Thickness',
             'units': 'm',
-            'cell_methods': 'area:mean z_l:sum yh:mean xh:mean time: mean',
+            'cell_methods': f'area:mean {zdim}:sum yh:mean xh:mean time: mean',
             'cell_measures': 'volume: volcello area: areacello',
             'time_avg_info': 'average_T1,average_T2,average_DT',
             'standard_name': 'cell_thickness'
@@ -404,8 +411,9 @@ def add_sigma2_coords(ds):
             "long_name": "Potential Density referenced to 2000 dbar (minus 1000 kg/m3)",
             "units": "kg m-3",
             "cell_methods": "area:mean z_l:mean yh:mean xh:mean time:mean",
-            "volume": "volcello",
-            "area": "areacello",
+            # `volume`/`area` are not CF attributes; `cell_measures` is. `volcello`
+            # is dropped from this product, so only `areacello` is named.
+            "cell_measures": "area: areacello",
             "time_avg_info": "average_T1,average_T2,average_DT",
             "equation_of_state": "wright97-reduced (xeos; MOM6 EQN_OF_STATE=WRIGHT)",
             "provenance": (
@@ -424,8 +432,7 @@ def add_sigma2_coords(ds):
             "long_name": "Potential Density referenced to 2000 dbar (minus 1000 kg/m3)",
             "units": "kg m-3",
             "cell_methods": "area:mean z_l:mean yh:mean xh:mean time:point",
-            "volume": "volcello",
-            "area": "areacello",
+            "cell_measures": "area: areacello",
             "equation_of_state": "wright97-reduced (xeos; MOM6 EQN_OF_STATE=WRIGHT)",
             "provenance": (
                 "Computed offline by CM4Xutils from the snapshot `thetao` and `so` with the MOM6 Wright (1997) reduced-range equation of state via xeos, matching the CM4X model configuration EQN_OF_STATE='WRIGHT'. It is therefore the model's own density to ~1e-12 kg m-3, but evaluated on snapshot state, so it is not identical to the instantaneous density the model used online."
@@ -508,13 +515,32 @@ def rho2_transports_to_sigma2(ds_rho2, sigma2_l, sigma2_i):
 
     return ds
 
-def correct_cell_methods(ds):
-    """Correct cell methods for depth and wet mask coordinates.
+# MOM6 registers the parameterized-mesoscale-neutral-diffusion tendencies with
+# `x_cell_method='sum'` / `y_cell_method='sum'`, which contradicts their own units:
+# `opottemppmdiff` is W m-2 and `osaltpmdiff` is kg m-2 s-1, i.e. *per unit area*,
+# exactly like their dianeutral counterparts `opottempdiff`/`osaltdiff`, which MOM6
+# does register as `xh:mean yh:mean`. CMIP6 likewise specifies these variables with
+# `area: mean where sea`. Taken at face value the `sum` methods send them down
+# `horizontally_coarsen`'s wet-masked-sum path, which is meant only for `areacello`,
+# inflating them by roughly the number of sub-cells per coarse cell; on CM4Xp125 it
+# also excludes them from the 3D wet-mask correction in `make_wmt_grid`, which keys
+# on `xh:mean`/`yh:mean`.
+PMDIFF_CELL_METHOD_FIXES = {
+    "opottemppmdiff": ("area:sum", "area:mean"),
+    "osaltpmdiff": ("area:sum", "area:mean"),
+}
 
-    These static-file coordinates are missing (or carry incorrect) ``cell_methods``
-    attributes, so their coarsening behavior would otherwise be undefined. This
-    stamps the correct methods so `horizontally_coarsen` treats each one properly:
-    `wet`/`deptho` as tracer-cell means, `wet_u`/`wet_v` as face quantities.
+def correct_cell_methods(ds):
+    """Correct cell methods that the source files get wrong or omit.
+
+    Static-file coordinates (`wet`, `wet_u`, `wet_v`, `deptho`) are missing (or carry
+    incorrect) ``cell_methods``, so their coarsening behavior would otherwise be
+    undefined; this stamps the correct methods so `horizontally_coarsen` treats each
+    one properly: `wet`/`deptho` as tracer-cell means, `wet_u`/`wet_v` as face
+    quantities.
+
+    It also repairs the `opottemppmdiff`/`osaltpmdiff` sum-vs-mean contradiction
+    described above `PMDIFF_CELL_METHOD_FIXES`.
 
     Modifies `ds` in place (does not return a new dataset).
 
@@ -525,11 +551,71 @@ def correct_cell_methods(ds):
     def correct_cell_method(v, cell_methods):
         if v in list(ds.data_vars)+list(ds.coords):
             ds[v].attrs["cell_methods"] = cell_methods
-        
+
     correct_cell_method("wet", "xh:mean yh:mean time:point")
     correct_cell_method("wet_u", "xq:point yh:mean time:point")
     correct_cell_method("wet_v", "xh:mean yq:point time:point")
     correct_cell_method("deptho", "xh:mean yh:mean time:point")
+
+    for (v, (old_area, new_area)) in PMDIFF_CELL_METHOD_FIXES.items():
+        if (v in ds.data_vars) and ("cell_methods" in ds[v].attrs):
+            cm = parse_cell_methods(ds[v].attrs["cell_methods"])
+            if cm.get("area") == old_area.split(":")[1]:
+                cm["area"] = new_area.split(":")[1]
+                for d in ["xh", "yh"]:
+                    if cm.get(d) == "sum":
+                        cm[d] = "mean"
+                ds[v].attrs["cell_methods"] = stringify_cell_methods_dict(cm)
+                ds[v].attrs.setdefault(
+                    "cell_methods_note",
+                    "The archived diagnostic declares `area:sum xh:sum yh:sum`, which "
+                    "contradicts its per-area units; corrected to `mean` by CM4Xutils "
+                    "to match `opottempdiff`/`osaltdiff` and the CMIP6 specification."
+                )
+
+def prune_cell_measures(ds):
+    """Drop `cell_measures` entries that point at variables `ds` does not contain.
+
+    Almost every budget variable inherits ``cell_measures = "volume: volcello"`` from
+    the archived diagnostics, but `add_sigma2_coords` drops `volcello` (it is not
+    meaningful once the vertical coordinate is density, and the remapped `thkcello`
+    supersedes it). CF requires every named measure to resolve, either in the file or
+    via `external_variables`, so the surviving reference is invalid and points a
+    reader at something that is not there.
+
+    Where a variable is left with no measure at all but is on the tracer grid,
+    ``area: areacello`` is substituted, since `areacello` *is* in the file and is the
+    measure needed to turn an area-mean back into a cell integral.
+
+    Modifies `ds` in place.
+    """
+    present = set(ds.variables)
+    for v in ds.variables:
+        cm = ds[v].attrs.get("cell_measures")
+        if not cm:
+            continue
+        kept = [
+            f"{k}: {name}"
+            for (k, name) in (
+                tok.split(":") for tok in _split_cell_measures(cm)
+            )
+            if name in present
+        ]
+        # Only substitute the tracer-cell area for variables that actually live on
+        # the tracer grid -- `areacello` is not the measure of a u- or v-face.
+        on_tracer_grid = {"xh", "yh"} <= set(ds[v].dims)
+        if not kept and ("areacello" in present) and on_tracer_grid:
+            kept = ["area: areacello"]
+        if kept:
+            ds[v].attrs["cell_measures"] = " ".join(kept)
+        else:
+            ds[v].attrs.pop("cell_measures", None)
+    return ds
+
+def _split_cell_measures(s):
+    """Yield ``"<key>:<name>"`` tokens from a CF ``cell_measures`` string."""
+    tokens = replace_by_dict(s, {": ": ":", " :": ":", " : ": ":"}).split()
+    return [t for t in tokens if ":" in t]
 
 def replace_by_dict(s, d):
     """Apply multiple string replacements by looping through a dictionary"""
