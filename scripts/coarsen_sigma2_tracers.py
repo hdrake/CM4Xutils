@@ -2,7 +2,7 @@
 # coding: utf-8
 import sys
 import numpy as np
-from CM4Xutils import __version__
+from CM4Xutils import __version__, finalize_metadata
 from remap_functions import remap_tracers_to_sigma2_and_coarsen
 
 # The dataset release is versioned in lockstep with the package that generated it, so
@@ -26,6 +26,15 @@ for start_year in np.arange(interval_start, interval_start+interval_length, 5):
 
     filename = f"../data/coarsened/{model}_{experiment}_tracers_sigma2_{year_range}.zarr"
     ds = remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year)
-    ds.attrs["version"] = f"v{__version__}"
-    ds.attrs["version_notes"] = version_notes
+    # See the note in coarsen_sigma2_budgets.py: `finalize_metadata` writes the
+    # machine-readable `product_version` / `source_software` in place of the old
+    # hand-formatted `version` string.
+    ds = finalize_metadata(
+        ds,
+        model=model,
+        product="tracers",
+        experiment=experiment,
+        time_range=year_range,
+        version_notes=version_notes,
+    )
     ds.to_zarr(filename, mode="w")

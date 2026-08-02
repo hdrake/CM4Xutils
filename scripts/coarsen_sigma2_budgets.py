@@ -2,7 +2,7 @@
 # coding: utf-8
 import sys
 import numpy as np
-from CM4Xutils import __version__, chunk_dataset
+from CM4Xutils import __version__, chunk_dataset, finalize_metadata
 from remap_functions import remap_budgets_to_sigma2_and_coarsen
 
 # The dataset release is versioned in lockstep with the package that generated it, so
@@ -25,6 +25,15 @@ for start_year in np.arange(interval_start, interval_start+interval_length, 5):
     filename = f"../data/coarsened/{model}_budgets_sigma2_{year_range}.zarr"
     ds = remap_budgets_to_sigma2_and_coarsen(model, start_year)
     ds = chunk_dataset(ds, {"time":1, "time_bounds":1})
-    ds.attrs["version"] = f"v{__version__}"
-    ds.attrs["version_notes"] = version_notes
+    # `finalize_metadata` owns every descriptive attribute, including the dataset
+    # release version -- it writes a machine-readable `product_version` (bare semver)
+    # and `source_software`, so the version is no longer restated as a separate
+    # hand-formatted `version` string that could drift from it.
+    ds = finalize_metadata(
+        ds,
+        model=model,
+        product="budgets",
+        time_range=year_range,
+        version_notes=version_notes,
+    )
     ds.to_zarr(filename, mode="w")

@@ -291,9 +291,13 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
 
     for c in coord_vars:
         ds_coarse[c].attrs = ds[c].attrs
+        # `comment` (the CF attribute) rather than the ad-hoc `note` this used to
+        # write, so that everything explanatory lives under one key.
+        ds_coarse[c].attrs.pop("note", None)
         if c == "areacello":
-            ds_coarse[c].attrs["note"] = (
-                "We ignore land cells in partially wet cells when coarsening, "
+            ds_coarse[c].attrs["comment"] = (
+                "Ocean (wet) area of the coarse cell. We ignore land cells in "
+                "partially wet cells when coarsening, "
                 "so that tracer content can be accurately reconstructed "
                 "by multiplying coarsened area-averaged tendencies by it. "
                 "Fully wet (`wet==1.0`) and fully dry (`wet==0.0`) cells "
@@ -302,14 +306,21 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
                 "be derived from the ocean area by divding `areacello` by `wet`."
             )
         elif c == "wet":
-            ds_coarse[c].attrs["note"] = (
-                "Can be between 0 and 1 if coarse cell includes both wet "
-                "and dry sub-cells."
+            ds_coarse[c].attrs["comment"] = (
+                "Ocean area fraction of the coarse tracer cell. Can be between 0 "
+                "and 1 if the coarse cell includes both wet and dry sub-cells."
             )
-        elif c in ["wet_u", "wet_v"]:
-            ds_coarse[c].attrs["note"] = (
-                "Can be between 0 and 1 if coarse face includes both wet "
-                "and dry sub-faces."
+        elif c == "wet_u":
+            ds_coarse[c].attrs["comment"] = (
+                "Ocean fraction of the coarse u-face (the eastern/western face of "
+                "the tracer cell). Can be between 0 and 1 if the coarse face "
+                "includes both wet and dry sub-faces."
+            )
+        elif c == "wet_v":
+            ds_coarse[c].attrs["comment"] = (
+                "Ocean fraction of the coarse v-face (the northern/southern face of "
+                "the tracer cell). Can be between 0 and 1 if the coarse face "
+                "includes both wet and dry sub-faces."
             )
 
     # Stamp the per-variable provenance only now: the coordinate-attribute restore

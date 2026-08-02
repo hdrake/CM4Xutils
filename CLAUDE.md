@@ -91,10 +91,32 @@ Intervals are always multiples of 5 (the pp files are 5-year chunks). Outputs la
 - `coarsen.py` — `horizontally_coarsen`: grid-aware horizontal coarsening.
 - `loading.py` — GFDL-specific loaders (`load_wmt_ds`, `load_wmt_grid`, `load_density`,
   `load_tracer`, `load_transient_tracers`) plus scenario/time alignment.
+- `metadata.py` — `finalize_metadata`: purely *descriptive* output metadata (`units`,
+  `long_name`, `standard_name`, `comment`, coordinate `axis`/`bounds`, dataset-level
+  CF/ACDD attributes). It never writes `cell_methods`/`cell_measures`, which the
+  pipeline dispatches on and which therefore live with the code that consumes them.
 
 The canonical pipeline (see `scripts/remap_functions.py`) is:
 `load_wmt_grid` → `add_sigma2_coords` → `remap_vertical_coord("sigma2", ...)` →
-`ds_to_grid` → `horizontally_coarsen` → `to_zarr`.
+`ds_to_grid` → `horizontally_coarsen` → `finalize_metadata` → `to_zarr`.
+
+### Per-variable provenance
+
+The dataset-level `provenance` attribute cannot describe this product accurately,
+because variables take different paths: `umo`/`vmo` from `ocean_month_rho2` were
+remapped into density layers **online** by the model, while everything else is remapped
+**offline** here from monthly means. So every step that transforms a variable appends a
+sentence to *that variable's* `provenance` attribute via
+`append_provenance(obj, sentence)` (grid_preprocess.py) — coarsening (with the factors
+and the weighting actually applied to that variable), offline vertical remapping, the
+online rho2→sigma2 relabel, surface-flux vertical expansion, `taux`/`tauy`
+interpolation, sea-ice regridding, ideal-age time interpolation, and every derived
+variable. Sentences append and are never de-duplicated.
+
+**Placement matters.** `horizontally_coarsen` and `remap_vertical_coord` both reassign
+`.attrs` wholesale near the end, so both collect sentences in a dict during their loops
+and stamp them *after* those reassignments. Anything written earlier is silently lost.
+Same reason `finalize_metadata` is called last, in the generation scripts.
 
 ### `cell_methods` is load-bearing metadata
 
@@ -218,12 +240,16 @@ equation of state that defined those layers.
 ## Versioning and provenance
 
 `CM4Xutils/version.py` holds the package version; it is stamped into the `provenance`
-attribute of every coarsened/remapped dataset. The generation scripts *separately* stamp
-`ds.attrs["version"]` and `ds.attrs["version_notes"]` describing the dataset release.
+attribute of every coarsened/remapped dataset. `finalize_metadata` writes it once more
+as the machine-readable `product_version` (bare semver) plus `source_software`; the
+generation scripts supply only the prose `version_notes`. This replaces the older
+hand-formatted `ds.attrs["version"] = f"v{__version__}"`, which restated the same
+number in a second format — stores written before v2.0.0 carry `version`, not
+`product_version`.
 
 When a change alters numerical output (which most bug fixes here do — see the git log:
 d2 coarsening, area masks, boundary conditions, transport interpolation), bump the
-package version, update the dataset `version`/`version_notes` strings in
+package version, update the `version_notes` string in
 `scripts/coarsen_sigma2_*.py`, and regenerate. Older buggy outputs are kept in parallel
 directories (`data/coarsened_d2_bug/`, `data/coarsened_incorrect_wetmask/`,
 `data/coarsened_nanbugged/`, …) for comparison — don't delete these.
