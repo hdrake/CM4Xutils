@@ -173,12 +173,13 @@ sigma2 grid is the 74-layer coordinate in `data/sigma2_coords.nc`, which
 `add_sigma2_coords` loads and pads with one extra layer at each end to cover all
 plausible ocean densities.
 
-**Transports come from the native rho2 diagnostics where available (v2.0.0+).** MOM6
-accumulates the layer-integrated mass transports `umo`/`vmo` *online* into
-potential-density (`rho2`) layers in the `ocean_month_rho2` pp output, where they conserve
-mass exactly within each layer. The budget pipeline sources them from there:
-`load_rho2_transports` / `load_rho2_transports_ds` (loading.py) load the native
-transports, and `rho2_transports_to_sigma2` (grid_preprocess.py) relabels `rho2_l →
+**Transports come from the online-remapped rho2 diagnostics where available (v2.0.0+).**
+Density is *not* the model's native vertical coordinate — `ocean_month_rho2` is itself a
+remapping, but one MOM6 performs *online*, at every timestep and using the instantaneous
+density, accumulating the layer-integrated mass transports `umo`/`vmo` into
+potential-density (`rho2`) layers where they conserve mass exactly within each layer. The
+budget pipeline sources them from there: `load_rho2_transports` /
+`load_rho2_transports_ds` (loading.py) load the online-remapped transports, and `rho2_transports_to_sigma2` (grid_preprocess.py) relabels `rho2_l →
 sigma2_l` (`sigma2 = rho2 − 1000`) and zero-pads the two expansion layers onto the
 76-layer sigma2 grid — no offline vertical remapping. Because `ocean_month_rho2` is
 archived at *native* resolution (even for CM4Xp125, whose budget tendencies are on d2),
@@ -188,8 +189,8 @@ product's horizontal coordinates onto the coarsened transports before merging th
 
 **Not every model archives both transports.** CM4Xp125 saves both `umo` and `vmo` in
 `ocean_month_rho2`, but **CM4Xp25 saves only `vmo`** (no `umo`). `available_rho2_transports`
-/ `native_rho2_transport_vars` (loading.py) probe the filesystem, and
-`remap_budgets_to_sigma2_and_coarsen` only uses the native path when **both** `umo` and
+/ `online_rho2_transport_vars` (loading.py) probe the filesystem, and
+`remap_budgets_to_sigma2_and_coarsen` only uses the online path when **both** `umo` and
 `vmo` are present across every experiment in the interval (i.e. CM4Xp125). Otherwise
 (CM4Xp25) it falls back to the older offline z→sigma2 transport remap for both terms — via
 `itp_tracer_to_transports` (the v1.2.0 fix, returning NaN where either neighbor is dry),
@@ -210,7 +211,7 @@ geometric and never evaluates the EOS.) `cm4x_watermass` declares
 `xwmt`'s conservative/absolute default, reproduces the model's arithmetic. This shifts
 sigma2 by O(0.01–0.1 kg/m³) versus ≤v1.3.0 and matches the online density to ~1e-12 kg/m³.
 
-The two v2.0.0 changes are complementary: the native-transport path relabels the model's
+The two v2.0.0 changes are complementary: the online-transport path relabels the model's
 own `rho2` layers as sigma2, and this makes the offline sigma2 coordinate use the same
 equation of state that defined those layers.
 
@@ -244,7 +245,8 @@ staged output.
 
 - Datasets in `data/coarsened/` predate v2.0.0: they were written without the `thkcello`
   that `add_grid_coords` derives from `volcello/areacello`, and with `umo`/`vmo` derived by
-  the old offline z→sigma2 remap rather than the native `ocean_month_rho2` diagnostics
+  the old offline z→sigma2 remap rather than the online-remapped `ocean_month_rho2`
+  diagnostics
   (v2.0.0+). They need regeneration. Both `scripts/coarsen_sigma2_*.py` now derive the
   dataset `version` attribute from `CM4Xutils/version.py`, so it can no longer drift from
   the package version the way the old hard-coded strings did.

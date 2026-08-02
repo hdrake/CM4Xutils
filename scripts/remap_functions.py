@@ -16,26 +16,26 @@ def remap_budgets_to_sigma2_and_coarsen(model, start_year):
         "CM4Xp25": {"X": 6, "Y": 6},
         "CM4Xp125": {"X": 6, "Y": 5}, # Note: these are already on d2 grid
     }
-    # Native rho2 transports are archived at native resolution, so for CM4Xp125 they need
-    # twice the coarsening of the d2 budget diagnostics to land on the same coarse grid
-    # (d2 == native coarsened by 2).
+    # The online-remapped rho2 transports are archived at native horizontal resolution,
+    # so for CM4Xp125 they need twice the coarsening of the d2 budget diagnostics to land
+    # on the same coarse grid (d2 == native coarsened by 2).
     transport_coarsen_dims = {
         "CM4Xp25": {"X": 6, "Y": 6},
         "CM4Xp125": {"X": 12, "Y": 10},
     }
 
-    # Only source transports from the native rho2 diagnostics when BOTH `umo` and `vmo`
-    # are archived across all experiments in this interval. CM4Xp125 saves both; CM4Xp25
-    # saves only `vmo`, so CM4Xp25 keeps the offline z->sigma2 transport remapping for
-    # both terms (auto-detected, not hard-coded).
-    native_vars = native_rho2_transport_vars(model, interval=str(start_year))
-    use_native_transports = native_vars == {"umo", "vmo"}
-    if use_native_transports:
-        print(f"Using native rho2 transports (umo, vmo) for {model}.")
+    # Only source transports from the online-remapped rho2 diagnostics when BOTH `umo`
+    # and `vmo` are archived across all experiments in this interval. CM4Xp125 saves both;
+    # CM4Xp25 saves only `vmo`, so CM4Xp25 keeps the offline z->sigma2 transport remapping
+    # for both terms (auto-detected, not hard-coded).
+    online_vars = online_rho2_transport_vars(model, interval=str(start_year))
+    use_online_transports = online_vars == {"umo", "vmo"}
+    if use_online_transports:
+        print(f"Using online-remapped rho2 transports (umo, vmo) for {model}.")
     else:
         print(
-            f"Native rho2 transports unavailable for {model} "
-            f"(found {sorted(native_vars)}); using offline z->sigma2 remap for umo/vmo."
+            f"Online-remapped rho2 transports unavailable for {model} "
+            f"(found {sorted(online_vars)}); using offline z->sigma2 remap for umo/vmo."
         )
 
     with warnings.catch_warnings():
@@ -50,11 +50,11 @@ def remap_budgets_to_sigma2_and_coarsen(model, start_year):
 
         ds = add_sigma2_coords(grid._ds)
         vars_2d = [v for v in ds.data_vars if sorted(ds[v].dims) == ['exp', 'time', 'xh', 'yh']]
-        # When using native transports, skip the offline z->sigma2 remap of umo/vmo.
+        # When using online-remapped transports, skip the offline z->sigma2 remap.
         ds_sigma2 = xr.merge([
             remap_vertical_coord(
                 "sigma2", ds, grid,
-                remap_transports=not use_native_transports
+                remap_transports=not use_online_transports
             ),
             ds[vars_2d]
         ])
@@ -70,8 +70,8 @@ def remap_budgets_to_sigma2_and_coarsen(model, start_year):
             {"sigma2_i": ds_sigma2.coords["sigma2_i"]}
         )
 
-    # --- Native density-coordinate transports (umo, vmo) from ocean_month_rho2 ---
-    if use_native_transports:
+    # --- Online-remapped density-coordinate transports (umo, vmo) from ocean_month_rho2 ---
+    if use_online_transports:
         with warnings.catch_warnings():
             warnings.simplefilter(action='ignore', category=FutureWarning)
             warnings.simplefilter(action='ignore', category=UserWarning)

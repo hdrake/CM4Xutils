@@ -589,7 +589,7 @@ def _rho2_pp(model, exp):
         return pp_dict[model][exp]
 
 def available_rho2_transports(model, exp):
-    """Return which of {'umo','vmo'} are archived in native `ocean_month_rho2`.
+    """Return which of {'umo','vmo'} are archived in `ocean_month_rho2`.
 
     CM4X does not archive the same density-coordinate transports for every model:
     CM4Xp125 saves both `umo` and `vmo`, but CM4Xp25 saves only `vmo`. We probe the
@@ -600,12 +600,12 @@ def available_rho2_transports(model, exp):
     base = os.path.join(pp, "ocean_month_rho2", "ts", local)
     return {v for v in ["umo", "vmo"] if glob.glob(os.path.join(base, f"*.{v}.nc"))}
 
-def native_rho2_transport_vars(model, interval="all"):
-    """Transport vars available natively across *all* experiments loaded for `interval`.
+def online_rho2_transport_vars(model, interval="all"):
+    """Transport vars available online-remapped across *all* experiments in `interval`.
 
     Returns the intersection of `available_rho2_transports` over the experiments that
     `_interval_load_flags` selects, so the budget pipeline only sources a transport
-    natively when it exists for every branch it needs to concatenate.
+    from `ocean_month_rho2` when it exists for every branch it needs to concatenate.
     """
     flags = _interval_load_flags(model, interval)
     exps = [e for (e, key) in [
@@ -622,7 +622,7 @@ def native_rho2_transport_vars(model, interval="all"):
     return avail or set()
 
 def load_rho2_transports(model, exp, time="*", dmget=False, mirror=False, transport_vars=None):
-    """Load native density-coordinate mass transports for one experiment.
+    """Load online-remapped density-coordinate mass transports for one experiment.
 
     MOM6 accumulates the layer-integrated transports `umo`/`vmo` (and `thkcello`)
     *online* into potential-density (`rho2`) layers and archives them in the
@@ -634,7 +634,7 @@ def load_rho2_transports(model, exp, time="*", dmget=False, mirror=False, transp
 
     `transport_vars` selects which of {'umo','vmo'} to load; if None, whichever are
     archived (`available_rho2_transports`) are used. Returns an `xr.Dataset` (not a grid)
-    on the native `rho2_l` coordinate so it can be passed through `concat_scenarios` /
+    on the `rho2_l` coordinate so it can be passed through `concat_scenarios` /
     `align_dates` by `load_rho2_transports_ds`.
     """
     pp = _rho2_pp(model, exp)
@@ -659,13 +659,13 @@ def load_rho2_transports(model, exp, time="*", dmget=False, mirror=False, transp
     return ds
 
 def load_rho2_transports_ds(model, dmget=False, mirror=False, interval="all"):
-    """Load native rho2 transports with the same structure as `load_wmt_ds`.
+    """Load online-remapped rho2 transports with the same structure as `load_wmt_ds`.
 
     Mirrors the experiment-selection, `exp`-dimension concatenation, and calendar
     alignment of `load_wmt_ds` (via the shared `_interval_load_flags` helper,
     `concat_scenarios`, and `align_dates`) so the returned transports can be merged
     directly into the budget product. Only transports available across *all* loaded
-    experiments (`native_rho2_transport_vars`) are loaded, so the concatenation is
+    experiments (`online_rho2_transport_vars`) are loaded, so the concatenation is
     consistent. Transports are time-means only, so none of the snapshot / `time_bounds`
     machinery of `load_wmt_ds` is needed here.
     """
@@ -678,7 +678,7 @@ def load_rho2_transports_ds(model, dmget=False, mirror=False, interval="all"):
     load_hist           = flags["load_hist"]
     load_ssp5           = flags["load_ssp5"]
 
-    tvars = native_rho2_transport_vars(model, interval)
+    tvars = online_rho2_transport_vars(model, interval)
 
     if load_spin:
         print(f"Loading {model}-piControl-spinup transports for interval `{interval}`.")

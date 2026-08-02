@@ -400,21 +400,23 @@ def add_sigma2_coords(ds):
     return ds
 
 def rho2_transports_to_sigma2(ds_rho2, sigma2_l, sigma2_i):
-    """Relabel native `rho2`-layer transports onto the padded 76-layer `sigma2` grid.
+    """Relabel online-remapped `rho2`-layer transports onto the padded 76-layer `sigma2` grid.
 
     MOM6 archives the layer-integrated mass transports `umo`/`vmo` (and `thkcello`)
     directly in potential-density (`rho2`) coordinates in the `ocean_month_rho2` pp
-    output, where `sigma2 = rho2 - 1000`. These native 74 `rho2` layers are exactly the
-    interior of the 76-layer target `sigma2` grid built by `add_sigma2_coords` (which
-    pads one extra layer at each end). We therefore swap the vertical dimension to
-    `sigma2_l`, zero-pad one layer at each end (no transport exists outside the diagnostic
-    density range), and assign the target coordinates. No floating-point coordinate
-    matching and no offline vertical remapping is performed -- these transports are the
-    model's own online density-binned diagnostics.
+    output, where `sigma2 = rho2 - 1000`. Density is *not* the model's native vertical
+    coordinate: `ocean_month_rho2` is itself a remapping, but one performed online by
+    the model at every timestep using the instantaneous density, then time-averaged.
+    Those 74 `rho2` layers are exactly the interior of the 76-layer target `sigma2` grid
+    built by `add_sigma2_coords` (which pads one extra layer at each end). We therefore
+    swap the vertical dimension to `sigma2_l`, zero-pad one layer at each end (no
+    transport exists outside the diagnostic density range), and assign the target
+    coordinates. No floating-point coordinate matching and no *offline* vertical
+    remapping is performed here.
 
     Parameters
     ----------
-    ds_rho2 : `xr.Dataset` on the native `rho2_l` coordinate (e.g. from
+    ds_rho2 : `xr.Dataset` on the `rho2_l` coordinate (e.g. from
         `load_rho2_transports` / `load_rho2_transports_ds`).
     sigma2_l : `xr.DataArray` of the 76 target layer centers (from a dataset that has been
         passed through `add_sigma2_coords`).
@@ -424,11 +426,11 @@ def rho2_transports_to_sigma2(ds_rho2, sigma2_l, sigma2_i):
     -------
     ds : `xr.Dataset` with the transports relabeled onto the `sigma2_l` coordinate.
     """
-    n_native = ds_rho2.sizes["rho2_l"]
+    n_rho2 = ds_rho2.sizes["rho2_l"]
     n_interior = sigma2_l.sizes["sigma2_l"] - 2
-    if n_native != n_interior:
+    if n_rho2 != n_interior:
         raise ValueError(
-            f"Native rho2 diagnostic has {n_native} layers but the target sigma2 grid "
+            f"The rho2 diagnostic has {n_rho2} layers but the target sigma2 grid "
             f"has {n_interior} interior layers; they must match to relabel without "
             f"remapping."
         )

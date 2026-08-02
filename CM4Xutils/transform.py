@@ -26,7 +26,7 @@ def remap_vertical_coord(coord, ds, grid, remap_transports=True):
     onto the corresponding cell faces and then do the remapping. This
     offline transport remapping is only an approximation of the model's
     online density binning; the budget pipeline instead sources `umo`/`vmo`
-    directly from the native `ocean_month_rho2` diagnostics (see
+    directly from the online-remapped `ocean_month_rho2` diagnostics (see
     `load_rho2_transports` / `rho2_transports_to_sigma2`) and calls this
     function with `remap_transports=False`.
 
@@ -39,7 +39,7 @@ def remap_vertical_coord(coord, ds, grid, remap_transports=True):
     grid : `xgcm.Grid`
     remap_transports : bool (default: True)
         If True, also remap `umo`/`vmo` by interpolating the target coordinate
-        onto cell faces (the fallback path for when native density-coordinate
+        onto cell faces (the fallback path for when online-remapped density-coordinate
         transports are unavailable). If False, `umo`/`vmo` are left out of the
         remapped dataset entirely.
 
