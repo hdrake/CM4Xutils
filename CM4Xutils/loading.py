@@ -12,6 +12,8 @@ carrying both a `time` (monthly-mean) and `time_bounds` (snapshot) axis, and a
 `control`/`forced` `exp` dimension. See CLAUDE.md for the full pipeline.
 """
 
+import os
+import glob
 import numpy as np
 import dask
 import xarray as xr
@@ -69,6 +71,26 @@ def cm4x_watermass(grid):
     reproduce the model's arithmetic exactly.
     """
     return xwmt.WaterMass(grid, eos=CM4X_EOS, t_var="potential", s_var="practical")
+
+
+def _restore_coord_attrs(ds, c_attrs):
+    """Re-attach coordinate attributes that xgcm/xarray operations dropped.
+
+    Only keys that are *missing* from the current attributes are restored, so
+    attributes deliberately (re)written downstream -- e.g. the corrected
+    ``cell_methods`` from `correct_cell_methods` -- always win. Coordinates that no
+    longer exist on `ds` are skipped rather than raising.
+
+    Parameters
+    ----------
+    ds : `xr.Dataset` to patch in place
+    c_attrs : dict, coord name -> attribute dict captured before the operation
+    """
+    for (c, a) in c_attrs.items():
+        if c not in ds.coords:
+            continue
+        for (k, v) in a.items():
+            ds.coords[c].attrs.setdefault(k, v)
 
 
 # The three loaders below stamp the same human-readable experiment description
@@ -245,6 +267,12 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
             'time_avg_info': 'average_T1,average_T2,average_DT',
             'units': 'W m-2'
         }
+        append_provenance(av_tend["rsdoabsorb"], (
+            "Derived by CM4Xutils as minus the vertical difference of the archived "
+            "downwelling shortwave flux `rsdo` across each layer's interfaces "
+            "(extended at the top and bottom), i.e. the shortwave energy absorbed "
+            "within the layer. Not an archived model diagnostic."
+        ))
     else:
         print(f"Missing `rsdo` diagnostic for {model}-{exp}")
     
@@ -271,9 +299,21 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     if 'taux' in hgrid._ds.data_vars:
         av_surf['taux'] = hgrid.interp(hgrid._ds['taux'].chunk({"xq":-1}), 'X', keep_attrs=True)
         av_surf['taux'].attrs['cell_methods'] = 'yh:mean xh:mean time:mean'
+        append_provenance(av_surf['taux'], (
+            "Interpolated from the zonal-velocity (Cu, `xq`) points onto the tracer "
+            "cell centers (`xh`) as the two-point average of the faces bounding each "
+            "cell in X (periodic in X). It is therefore no longer the value the model "
+            "applied at the u-points."
+        ))
     if 'tauy' in hgrid._ds.data_vars:
         av_surf['tauy'] = hgrid.interp(hgrid._ds['tauy'].chunk({"yq":-1}), 'Y', keep_attrs=True)
         av_surf['tauy'].attrs['cell_methods'] = 'yh:mean xh:mean time:mean'
+        append_provenance(av_surf['tauy'], (
+            "Interpolated from the meridional-velocity (Cv, `yq`) points onto the "
+            "tracer cell centers (`yh`) as the two-point average of the faces "
+            "bounding each cell in Y (edge values extended at the Y boundaries). It "
+            "is therefore no longer the value the model applied at the v-points."
+        ))
 
     # For CM4Xp125, surface fluxes are only available on native grid,
     # but 3D tendencies only available on d2 coarsened grid,
@@ -309,13 +349,13 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     av_ice = av_ice.rename({"xT":"xh_ice", "yT":"yh_ice"})
     av_ice = av_ice.assign_coords({"time":av_tend.time})
     
-    averages = xr.merge([av_tend, av_surf, av_ice]).chunk(chunk)
+    averages = chunk_dataset(xr.merge([av_tend, av_surf, av_ice]), chunk)
 
     # Case 1: We are either reading in all times or just the first 5-year interval.
     # In either case, there is no prior 5 yr interval, so we're missing the initial snapshot.
     if (time=="*") | (time=="000101*"):
         pdict_snap = get_wmt_pathDict(model, exp, "snapshot", time=time)
-        snapshots = gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror).chunk(chunk_center)
+        snapshots = chunk_dataset(gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror), chunk_center)
 
     # Case 2: we are only reading in a specific 5 yr interval,
     # in which case we also need the last snapshot from the prior interval.
@@ -345,8 +385,8 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
         pdict_snap = get_wmt_pathDict(model, exp, "snapshot", time=time)
         snapshots = xr.concat(
             [
-                gu.open_frompp(**pdict_snap_preceding, dmget=dmget, mirror=mirror).chunk(chunk_center).isel(time=-1),# only the last
-                gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror).chunk(chunk_center)
+                chunk_dataset(gu.open_frompp(**pdict_snap_preceding, dmget=dmget, mirror=mirror), chunk_center).isel(time=-1),# only the last
+                chunk_dataset(gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror), chunk_center)
             ],
             dim="time"
         )
@@ -358,6 +398,19 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
         **{'time':'time_bounds'},
         **{v:f"{v}_bounds" for v in snapshots.data_vars}
     })
+    # The snapshot stream inherits `time: mean` from the archived files even though
+    # these are instantaneous values, which mislabels every `*_bounds` variable in
+    # the released product as a time average. Only the X/Y/Z parts of `cell_methods`
+    # are dispatched on, so correcting the time part changes no numbers.
+    for v in snapshots.data_vars:
+        if "cell_methods" in snapshots[v].attrs:
+            cm = parse_cell_methods(snapshots[v].attrs["cell_methods"])
+            if cm.get("time") == "mean":
+                cm["time"] = "point"
+                snapshots[v].attrs["cell_methods"] = stringify_cell_methods_dict(cm)
+        # `time_avg_info` points at averaging-period variables that do not apply to
+        # an instantaneous field.
+        snapshots[v].attrs.pop("time_avg_info", None)
 
     ds_merged = xr.merge([averages, snapshots])
     return ds_merged
@@ -394,40 +447,53 @@ def expand_surface_fluxes(grid):
             attrs["cell_methods"] = "area:mean z_l:sum yh:mean xh:mean time: mean"
             attrs["long_name"] = f"Convergence of {attrs['long_name']}"
             grid._ds[v].attrs = attrs
+            append_provenance(grid._ds[v], (
+                "Recast from a 2D surface flux into a 3D layer convergence by "
+                "inserting the whole flux into the topmost model layer and setting "
+                "every deeper layer to zero, as `xwmb` expects boundary fluxes to be "
+                "supplied. Values are unchanged; only the vertical placement is new."
+            ))
 
-def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
-    """Load a comprehensive CM4X dataset with all variables required to run `xwmb`."""
+def _interval_load_flags(model, interval, test=False):
+    """Determine which experiments and time patterns to load for a given interval.
+
+    Shared by `load_wmt_ds` and `load_rho2_transports_ds` so that both build the same
+    control/forced `exp` structure and calendar alignment for a given `interval`.
+
+    Returns
+    -------
+    dict with keys: "time", "time_ctrl", "interval", "load_spin", "load_ctrl",
+    "load_ctrl_continued", "load_hist", "load_ssp5".
+    """
     if test:
-        time =      "201001*"
-        time_ctrl = "026101*"
-        interval  = "2010"
-        load_spin = False
-        load_ctrl = True
-        load_ctrl_continued = False
-        load_hist = True
-        load_ssp5 = False
-    elif interval=="all":
-        time = "*"
-        time_ctrl = "*"
-        load_spin = True
-        load_ctrl = True
-        load_ctrl_continued = True
-        load_hist = True
-        load_ssp5 = True
+        return {
+            "time": "201001*", "time_ctrl": "026101*", "interval": "2010",
+            "load_spin": False, "load_ctrl": True, "load_ctrl_continued": False,
+            "load_hist": True, "load_ssp5": False,
+        }
+    elif interval == "all":
+        return {
+            "time": "*", "time_ctrl": "*", "interval": interval,
+            "load_spin": True, "load_ctrl": True, "load_ctrl_continued": True,
+            "load_hist": True, "load_ssp5": True,
+        }
     elif interval.isnumeric():
-        if (int(interval)%5)==0:
-            time = f"{interval}01*"
+        if (int(interval) % 5) == 0:
             # Control years are offset by 1749 from the forced (historical) calendar.
-            interval_ctrl = str(int(interval)-1749)
-            time_ctrl = f"{interval_ctrl.zfill(4)}01*"
+            interval_ctrl = str(int(interval) - 1749)
             # The piControl was extended ("continued") from a later restart, so the
             # continued branch takes over once the control year reaches `continue_year`.
             continue_year = 361 if (model == "CM4Xp25") else 451
-            load_spin = int(interval) < 1850
-            load_ctrl = (1850 <= int(interval)) & (int(interval_ctrl) < continue_year)
-            load_ctrl_continued = (int(interval_ctrl) >= continue_year)
-            load_hist = (1850 <= int(interval)) & (int(interval) < 2015)
-            load_ssp5 = (2015 <= int(interval)) & (int(interval) < 2100)
+            return {
+                "time": f"{interval}01*",
+                "time_ctrl": f"{interval_ctrl.zfill(4)}01*",
+                "interval": interval,
+                "load_spin": int(interval) < 1850,
+                "load_ctrl": (1850 <= int(interval)) & (int(interval_ctrl) < continue_year),
+                "load_ctrl_continued": (int(interval_ctrl) >= continue_year),
+                "load_hist": (1850 <= int(interval)) & (int(interval) < 2015),
+                "load_ssp5": (2015 <= int(interval)) & (int(interval) < 2100),
+            }
         else:
             raise ValueError("interval must be an integer multiple of 5.")
     else:
@@ -435,6 +501,18 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
             f"interval must be 'all' or a string of an integer multiple of 5, "
             f"got {interval!r}."
         )
+
+def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
+    """Load a comprehensive CM4X dataset with all variables required to run `xwmb`."""
+    flags = _interval_load_flags(model, interval, test=test)
+    time                = flags["time"]
+    time_ctrl           = flags["time_ctrl"]
+    interval            = flags["interval"]
+    load_spin           = flags["load_spin"]
+    load_ctrl           = flags["load_ctrl"]
+    load_ctrl_continued = flags["load_ctrl_continued"]
+    load_hist           = flags["load_hist"]
+    load_ssp5           = flags["load_ssp5"]
 
     # Load mass/heat/salt budget diagnostics align times
     if load_spin:
@@ -539,6 +617,164 @@ def load_wmt_ds(model, test=False, dmget=False, mirror=False, interval="all"):
 
     return ds
 
+def _rho2_pp(model, exp):
+    """Resolve the pp path for one experiment (Dora, with hard-coded fallback)."""
+    try:
+        return doralite.dora_metadata(exp_dict[model][exp])['pathPP']
+    except:
+        print("Dora seems to be down. Using hard-coded paths instead.")
+        return pp_dict[model][exp]
+
+def available_rho2_transports(model, exp):
+    """Return which of {'umo','vmo'} are archived in `ocean_month_rho2`.
+
+    CM4X does not archive the same density-coordinate transports for every model:
+    CM4Xp125 saves both `umo` and `vmo`, but CM4Xp25 saves only `vmo`. We probe the
+    filesystem so the budget pipeline adapts automatically rather than hard-coding this.
+    """
+    pp = _rho2_pp(model, exp)
+    local = gu.get_local(pp, "ocean_month_rho2", "ts")
+    base = os.path.join(pp, "ocean_month_rho2", "ts", local)
+    return {v for v in ["umo", "vmo"] if glob.glob(os.path.join(base, f"*.{v}.nc"))}
+
+def online_rho2_transport_vars(model, interval="all"):
+    """Transport vars available online-remapped across *all* experiments in `interval`.
+
+    Returns the intersection of `available_rho2_transports` over the experiments that
+    `_interval_load_flags` selects, so the budget pipeline only sources a transport
+    from `ocean_month_rho2` when it exists for every branch it needs to concatenate.
+    """
+    flags = _interval_load_flags(model, interval)
+    exps = [e for (e, key) in [
+        ("piControl-spinup",    "load_spin"),
+        ("piControl",           "load_ctrl"),
+        ("piControl-continued", "load_ctrl_continued"),
+        ("historical",          "load_hist"),
+        ("ssp585",              "load_ssp5"),
+    ] if flags[key]]
+    avail = None
+    for e in exps:
+        a = available_rho2_transports(model, e)
+        avail = a if avail is None else (avail & a)
+    return avail or set()
+
+def load_rho2_transports(model, exp, time="*", dmget=False, mirror=False, transport_vars=None):
+    """Load online-remapped density-coordinate mass transports for one experiment.
+
+    MOM6 accumulates the layer-integrated transports `umo`/`vmo` (and `thkcello`)
+    *online* into potential-density (`rho2`) layers and archives them in the
+    `ocean_month_rho2` pp output, where they conserve mass exactly within each density
+    layer. This is much more accurate than remapping z-coordinate transports offline, so
+    the budget pipeline sources transports from here rather than from
+    `remap_vertical_coord`. See `load_rho2` in the CM4XTransientTracers `preprocessing`
+    module for the analogous single-experiment loader this follows.
+
+    `transport_vars` selects which of {'umo','vmo'} to load; if None, whichever are
+    archived (`available_rho2_transports`) are used. Returns an `xr.Dataset` (not a grid)
+    on the `rho2_l` coordinate so it can be passed through `concat_scenarios` /
+    `align_dates` by `load_rho2_transports_ds`.
+    """
+    pp = _rho2_pp(model, exp)
+    ppname = "ocean_month_rho2"
+    out = "ts"
+    local = gu.get_local(pp, ppname, out)
+    if transport_vars is None:
+        transport_vars = available_rho2_transports(model, exp)
+    load_vars = sorted(transport_vars) + ["thkcello"]
+    ds = gu.open_frompp(
+        pp, ppname, out, local, time, load_vars,
+        dmget=dmget, mirror=mirror
+    )
+    ds = chunk_dataset(ds, {"time": 1, "rho2_l": -1})
+
+    og = gu.open_static(pp, ppname)
+    sg = xr.open_dataset(exp_dict[model]["hgrid"])
+    og = fix_geo_coords(og, sg)
+    ds = add_grid_coords(ds, og)
+
+    ds.attrs["model"] = model
+    return ds
+
+def load_rho2_transports_ds(model, dmget=False, mirror=False, interval="all"):
+    """Load online-remapped rho2 transports with the same structure as `load_wmt_ds`.
+
+    Mirrors the experiment-selection, `exp`-dimension concatenation, and calendar
+    alignment of `load_wmt_ds` (via the shared `_interval_load_flags` helper,
+    `concat_scenarios`, and `align_dates`) so the returned transports can be merged
+    directly into the budget product. Only transports available across *all* loaded
+    experiments (`online_rho2_transport_vars`) are loaded, so the concatenation is
+    consistent. Transports are time-means only, so none of the snapshot / `time_bounds`
+    machinery of `load_wmt_ds` is needed here.
+    """
+    flags = _interval_load_flags(model, interval)
+    time                = flags["time"]
+    time_ctrl           = flags["time_ctrl"]
+    load_spin           = flags["load_spin"]
+    load_ctrl           = flags["load_ctrl"]
+    load_ctrl_continued = flags["load_ctrl_continued"]
+    load_hist           = flags["load_hist"]
+    load_ssp5           = flags["load_ssp5"]
+
+    tvars = online_rho2_transport_vars(model, interval)
+
+    if load_spin:
+        print(f"Loading {model}-piControl-spinup transports for interval `{interval}`.")
+        spinup = load_rho2_transports(model, "piControl-spinup", time=time_ctrl, dmget=dmget, mirror=mirror, transport_vars=tvars)
+    if load_ctrl:
+        print(f"Loading {model}-piControl transports for interval `{interval}`.")
+        ctrl = load_rho2_transports(model, "piControl", time=time_ctrl, dmget=dmget, mirror=mirror, transport_vars=tvars)
+    if load_ctrl_continued:
+        print(f"Loading {model}-piControl-continued transports for interval `{interval}`.")
+        ctrl_continued = load_rho2_transports(model, "piControl-continued", time=time_ctrl, dmget=dmget, mirror=mirror, transport_vars=tvars)
+    if load_hist:
+        print(f"Loading {model}-historical transports for interval `{interval}`.")
+        hist = load_rho2_transports(model, "historical", time=time, dmget=dmget, mirror=mirror, transport_vars=tvars)
+    if load_ssp5:
+        print(f"Loading {model}-ssp585 transports for interval `{interval}`.")
+        ssp5 = load_rho2_transports(model, "ssp585", time=time, dmget=dmget, mirror=mirror, transport_vars=tvars)
+
+    if load_hist and load_ssp5:
+        forc = concat_scenarios([hist, ssp5])
+    elif load_hist:
+        forc = hist
+    elif load_ssp5:
+        forc = ssp5
+
+    if load_ctrl_continued:
+        if load_ctrl:
+            ctrl = concat_scenarios([ctrl, ctrl_continued])
+        else:
+            ctrl = ctrl_continued
+
+    # Case 1: only spinup intervals
+    if load_spin and not(load_ctrl):
+        ds = xr.concat([
+            spinup.expand_dims({'exp': ["forced"]}),
+            spinup.expand_dims({'exp': ["control"]})
+        ], dim="exp", combine_attrs="override")
+
+    # Case 2: control period (including forced runs)
+    elif load_ctrl | load_ctrl_continued:
+        if (load_hist) | (load_ssp5):
+            ctrl, forc = align_dates(ctrl, forc)
+            ds = xr.concat([
+                forc.expand_dims({'exp': ["forced"]}),
+                ctrl.expand_dims({'exp': ["control"]})
+            ], dim="exp", combine_attrs="override")
+        else:
+            ds = ctrl.expand_dims({'exp': ["control"]})
+
+        if load_spin:
+            spinup = xr.concat([
+                spinup.expand_dims({'exp': ["forced"]}),
+                spinup.expand_dims({'exp': ["control"]})
+            ], dim="exp", combine_attrs="override")
+            ds = concat_scenarios([spinup, ds])
+
+    ds.coords["exp"].attrs = {"long_name": "Experiment type"}
+    ds.attrs["model"] = model
+    return ds
+
 def load_tracer(odiv, tracer, time="*"):
     """Load a CM4X dataset with `tracer`."""
     meta = doralite.dora_metadata(odiv)
@@ -564,8 +800,15 @@ def load_tracer(odiv, tracer, time="*"):
                 pp, ppname, out, local, str(int(time[:-1]) - 5).zfill(4) + "*", tracer,
                 dmget=True
             ).isel(time=np.arange(5, 10, 1))
-  
-    ds = ds.chunk({"time":1, "z_l":-1})
+    else:
+        # Previously fell through with `ds` unbound, raising an opaque
+        # UnboundLocalError further down.
+        raise ValueError(
+            f"Don't know how to slice a single interval out of pp chunking {local!r} "
+            f"for {ppname}; only 'ts/*/5yr' and 'ts/annual/10yr' are handled."
+        )
+
+    ds = chunk_dataset(ds, {"time":1, "z_l":-1})
     
     return ds
 
@@ -581,7 +824,7 @@ def load_density(odiv, time="*"):
         pp, ppname, out, local, time, state_vars,
         dmget=True
     )
-    ds = ds.chunk({"time":1, "z_l":-1})
+    ds = chunk_dataset(ds, {"time":1, "z_l":-1})
     
     c_attrs = {c:ds.coords[c].attrs.copy() for c in ds.coords}
 
@@ -616,13 +859,7 @@ def load_density(odiv, time="*"):
     wm_averages = cm4x_watermass(xgcm.Grid(ds[["thetao", "so", "thkcello", "z_i"]], **wm_kwargs))
     ds["sigma2"] = wm_averages.get_density("sigma2")
 
-    for (c,a) in c_attrs.items():
-        if not hasattr(ds.coords[c], 'attrs'):
-            ds.coords[c].attrs = a
-        else:
-            for (k,v) in a.items():
-                if k not in ds.coords[c].attrs.keys():
-                    ds.coords[c].attrs[k] = v
+    _restore_coord_attrs(ds, c_attrs)
 
     correct_cell_methods(ds)
 
@@ -643,7 +880,7 @@ def load_density_annual(odiv, time="*"):
         pp, ppname, out, local, time, state_vars,
         dmget=True
     )
-    ds = ds.chunk({"time":1, "zl":-1, "zi":-1})
+    ds = chunk_dataset(ds, {"time":1, "zl":-1, "zi":-1})
     ds = ds.drop_vars(["rsdo"])
     
     c_attrs = {c:ds.coords[c].attrs.copy() for c in ds.coords}
@@ -660,13 +897,7 @@ def load_density_annual(odiv, time="*"):
     wm_averages = cm4x_watermass(xgcm.Grid(ds[["thetao", "so", "thkcello", "zi"]], **wm_kwargs))
     ds["sigma2"] = wm_averages.get_density("sigma2")
 
-    for (c,a) in c_attrs.items():
-        if not hasattr(ds.coords[c], 'attrs'):
-            ds.coords[c].attrs = a
-        else:
-            for (k,v) in a.items():
-                if k not in ds.coords[c].attrs.keys():
-                    ds.coords[c].attrs[k] = v
+    _restore_coord_attrs(ds, c_attrs)
 
     correct_cell_methods(ds)
 
@@ -712,10 +943,22 @@ def regrid_ice(ds, og, ig):
     if "xh_ice" in ds.coords:
         ds_ice = ds.drop_dims(["xh", "yh"])
         ds_ice = ds_ice.rename({"xh_ice":"xh", "yh_ice":"yh"})
-        if ds.xh_ice.size == 2*ds.xh.size:
+        refined = ds.xh_ice.size == 2*ds.xh.size
+        if refined:
             ds_ice = ds_ice.assign_coords({
+                # Copy-paste fix: this took `og.wet.attrs` (the land mask's), which
+                # gave the ice-cell area a mask's `long_name` and, more importantly,
+                # `wet`'s mean-mean `cell_methods` instead of an area's sum-sum ones.
+                # It only ever fed `grid_ice`'s metric (by value) and is dropped
+                # immediately afterwards, so no ice field's numbers depended on it.
                 "areacello": xr.DataArray(
-                    ig.CELL_AREA.values, dims=("yh", "xh"), attrs=og.wet.attrs
+                    ig.CELL_AREA.values, dims=("yh", "xh"),
+                    attrs={
+                        "long_name": "Ocean Grid-Cell Area",
+                        "units": "m2",
+                        "standard_name": "cell_area",
+                        "cell_methods": "area:sum yh:sum xh:sum time:point",
+                    },
                 ),
                 "wet": xr.DataArray(
                     og.wet.values, dims=("yh", "xh"), attrs=og.wet.attrs
@@ -734,6 +977,14 @@ def regrid_ice(ds, og, ig):
                 {"X":2, "Y":2},
                 skip_coords=True
             ).drop_vars(["areacello", "wet"])
+        for v in ds_ice.data_vars:
+            append_provenance(ds_ice[v], (
+                "Moved from the sea-ice model grid (`xh_ice`/`yh_ice`) onto the ocean "
+                "tracer grid (`xh`/`yh`)"
+                + (", which is 2x coarser, by the ice-cell-area-weighted 2x2 mean "
+                   "recorded above." if refined else
+                   ", which is the same grid; only the dimension names changed.")
+            ))
         ds = xr.merge([
             ds.drop_dims(["xh_ice", "yh_ice"]),
             ds_ice.assign_coords({"xh":ds.xh, "yh":ds.yh})
@@ -834,10 +1085,15 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
             
             ds_coarsened_wet_mask = ds_coarsened_wet_mask.assign_coords(ds.coords)
 
-            mms_cell_methods = ["xh:mean", "yh:mean", "z_l:sum"]
+            # Parse rather than substring-match: a substring test silently depends
+            # on the exact spelling ("xh:mean" vs "xh: mean") of a string this
+            # package also rewrites, and a miss here silently skips the wet-mask
+            # correction for that variable.
+            mms_cell_methods = {"xh": "mean", "yh": "mean", "z_l": "sum"}
             for k,v in ds.data_vars.items():
                 if "cell_methods" in v.attrs:
-                    if all([d in v.attrs["cell_methods"] for d in mms_cell_methods]):
+                    cm = parse_cell_methods(v.attrs["cell_methods"])
+                    if all([cm.get(d) == m for (d, m) in mms_cell_methods.items()]):
                         ds[k] = xr.DataArray(
                             ds[k] * ds_coarsened_wet_mask.wet_mask,
                             attrs = ds[k].attrs
@@ -906,6 +1162,16 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
             else:
                 ds["fsitherm"].data = fsitherm.data
             ds["prlq"].data = ds["RAIN"].data
+            append_provenance(ds["fsitherm"], (
+                "Recomputed by CM4Xutils as `prlq` - `RAIN`: the archived ocean `prlq` "
+                "lumps the sea-ice melt/freeze freshwater flux in with liquid "
+                "precipitation, so the sea-ice part is split back out here."
+            ))
+            append_provenance(ds["prlq"], (
+                "Replaced by CM4Xutils with the sea-ice model's `RAIN` diagnostic: the "
+                "archived ocean `prlq` also contained the sea-ice melt/freeze "
+                "freshwater flux, which has been moved to `fsitherm`."
+            ))
 
     # Construct 3D h_tendency from wfo if it does not exist
     if "boundary_forcing_h_tendency" not in grid._ds:
@@ -922,6 +1188,14 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
                 'cell_measures': 'volume: volcello area: areacello',
                 'time_avg_info': 'average_T1,average_T2,average_DT'
             }
+            append_provenance(grid._ds["boundary_forcing_h_tendency"], (
+                "Derived by CM4Xutils, not archived by the model: the 2D surface "
+                "freshwater flux `wfo` [kg m-2 s-1] was inserted at the ocean surface "
+                "and differenced vertically to give a per-layer convergence, then "
+                "divided by the Boussinesq reference density RHO_0 = 1035 kg m-3 to "
+                "convert it to a thickness tendency [m s-1]. All of it therefore lands "
+                "in the topmost layer."
+            ))
     
     # Compute potential density variables
     coords = {'Z': grid.axes['Z'].coords}
@@ -939,13 +1213,7 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
     wm_snapshots = cm4x_watermass(xgcm.Grid(snapshot_state_vars.rename(rename_vardict), **wm_kwargs))
     grid._ds["sigma2_bounds"] = wm_snapshots.get_density("sigma2")
 
-    for (c,a) in c_attrs.items():
-        if not hasattr(grid._ds.coords[c], 'attrs'):
-            grid._ds.coords[c].attrs = a
-        else:
-            for (k,v) in a.items():
-                if k not in grid._ds.coords[c].attrs.keys():
-                    grid._ds.coords[c].attrs[k] = v
+    _restore_coord_attrs(grid._ds, c_attrs)
     
     return grid
 

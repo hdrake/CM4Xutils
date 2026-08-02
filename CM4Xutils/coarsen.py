@@ -42,6 +42,17 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
         if (e in ds.coords)
     ]
 
+    # The tracer-cell wet mask is the same for every variable, so build it once
+    # rather than re-deriving (and re-persisting) it on each loop iteration.
+    partially_wet_mask = (ds.wet.fillna(0.) > 0.).persist()
+    wet_pos = ds.wet.where(ds.wet > 0.).persist()
+
+    # Per-variable provenance sentences, applied at the very end: several code paths
+    # below (and the coordinate-attribute restore) reassign `.attrs` wholesale, which
+    # would silently drop anything written during the loop.
+    provenance = {}
+    factors = ", ".join(f"{k} by {dim[k]}x" for k in sorted(dim))
+
     var_list = list(ds.data_vars) + coord_vars
     for v in var_list:
 
@@ -50,7 +61,7 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
         if "cell_methods" not in da.attrs:
             print(f"Skipping variable {v} because `cell_methods` attribute not defined.")
             continue
-            
+
         cell_method = parse_cell_methods(da.cell_methods)
         try:
             dim_names = {
@@ -60,9 +71,6 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
         except:
             print(f"Skipping {v} because independent of 'X' and 'Y' dims.")
             continue
-
-        partially_wet_mask = (ds.wet.fillna(0.) > 0.).persist()
-        wet_pos = ds.wet.where(ds.wet > 0.).persist()
 
         # Dispatch on the pair of X/Y cell methods. Three top-level cases:
         #   (mean, mean) -> weighted average (Case A below),
@@ -86,6 +94,7 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
             # Case 1. Default to ocean surface area weights
             A = grid.get_metric(da, ["X", "Y"]).fillna(0.) # ocean cell area
             weight = A.where(partially_wet_mask, 0.).persist() # ensure that land area is masked
+            weight_desc = "ocean cell area (`areacello`, masked to zero over land)"
             # Case 3. Overwrite weight with total cell area when calculating wet mask
             if v == "wet":
                 # convert ocean area to total cell area
@@ -94,6 +103,7 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
                     A/wet_pos,
                     A
                 ).fillna(0.).persist()
+                weight_desc = "total cell area (ocean + land, i.e. `areacello`/`wet`)"
             elif "Z" in grid.axes:
                 Zcenter = grid.axes["Z"].coords["center"]
                 if Zcenter in cell_method:
@@ -104,10 +114,18 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
                         suffix = "_bounds" if "_bounds" in v else ""
                         if f"volcello{suffix}" in ds:
                             weight = ds[f"volcello{suffix}"]
+                            weight_desc = f"ocean cell volume (`volcello{suffix}`)"
                         else:
                             h = ds[f"thkcello{suffix}"]
                             weight = A*h
-                    
+                            weight_desc = (
+                                f"ocean cell volume (`areacello` x `thkcello{suffix}`)"
+                            )
+            provenance[v] = (
+                f"Horizontally coarsened ({factors}) as a weighted mean, "
+                f"weighted by {weight_desc}."
+            )
+
             cdim = {dim_var:dim[dim_name] for (dim_name, dim_var) in dim_names.items()}
             attrs = da.attrs
             da_weighted_integral = (da*weight).fillna(0.).coarsen(dim=cdim).sum()
@@ -140,8 +158,14 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
             )
             da = da if (v in coord_vars) else da.where(da!=0.)
             da.attrs = attrs
-            
+            provenance[v] = (
+                f"Horizontally coarsened ({factors}) as a sum over the wet (ocean) "
+                f"sub-cells of each coarse cell."
+            )
+
         else:
+            skip_var = False
+            clauses = []
             # First check if we need to take an average in one of the directions,
             # because we need to use the cell widths at full resolution
             if any([cell_method[dim_var] == "mean" for dim_var in dim_names.values()]):
@@ -165,6 +189,10 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
                             weight_integral = weight_integral.assign_coords(da_coords)
                             da = (da_weighted_integral / weight_integral.where(weight_integral != 0.)).round(5)
                             da.attrs = attrs
+                            clauses.append(
+                                f"averaged along {dim_name} ({dim[dim_name]}x), weighted "
+                                f"by the u-face width `dyCu` per unit face wetness"
+                            )
                         elif v == "wet_v":
                             attrs = da.attrs
                             partially_wet_v_mask = ds.wet_v.fillna(0.) > 0.
@@ -182,29 +210,43 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
                             weight_integral = weight_integral.assign_coords(da_coords)
                             da = (da_weighted_integral / weight_integral.where(weight_integral != 0.)).round(5)
                             da.attrs = attrs
+                            clauses.append(
+                                f"averaged along {dim_name} ({dim[dim_name]}x), weighted "
+                                f"by the v-face width `dxCv` per unit face wetness"
+                            )
                         else:
-                            print(f"Skipping {v} because cell method is mean in {dim_var}.")
-                            continue
+                            # Only `wet_u`/`wet_v` have a defined face-width weighting
+                            # for a mixed mean/point (or mean/sum) method, so anything
+                            # else has to be dropped rather than partially coarsened.
+                            # NOTE: this used to `continue` the *inner* loop, which left
+                            # the variable in the output with its mean-axis uncoarsened
+                            # despite the printed message. No CM4X variable currently
+                            # reaches this branch, so making the skip real does not
+                            # change any released output.
+                            print(
+                                f"Skipping {v} because cell method is mean in {dim_var} "
+                                f"but it is not one of the face masks (wet_u, wet_v)."
+                            )
+                            skip_var = True
+                            break
 
             # Second check if we need to take a sum in either direction
             elif any([cell_method[dim_var] == "sum" for dim_var in dim_names.values()]):
                 for (dim_name, dim_var) in dim_names.items():
                     cdim = {dim_var:dim[dim_name]}
                     if cell_method[dim_var] == "sum":
+                        # Summing along one axis of a face quantity (e.g. `umo` along
+                        # Y, `vmo` along X) is masked by the *face* wet mask, not the
+                        # tracer-cell one.
                         if dim_name == "X":
-                            partially_wet_mask = ds.wet_v.fillna(0.) > 0.
-                            weight = xr.where(
-                                partially_wet_mask,
-                                partially_wet_mask.astype("float"),
-                                0.
-                            )
+                            face_wet_mask = ds.wet_v.fillna(0.) > 0.
                         elif dim_name == "Y":
-                            partially_wet_mask = ds.wet_u.fillna(0.) > 0.
-                            weight = xr.where(
-                                partially_wet_mask,
-                                partially_wet_mask.astype("float"),
-                                0.
-                            )
+                            face_wet_mask = ds.wet_u.fillna(0.) > 0.
+                        weight = xr.where(
+                            face_wet_mask,
+                            face_wet_mask.astype("float"),
+                            0.
+                        )
                         attrs = da.attrs
                         da = (da*weight).fillna(0.).coarsen(dim=cdim).sum()
                         da = xr.where(
@@ -214,11 +256,29 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
                         )
                         da = da if (v in coord_vars) else da.where(da!=0.)
                         da.attrs = attrs
+                        face_mask_name = "wet_v" if dim_name == "X" else "wet_u"
+                        clauses.append(
+                            f"summed along {dim_name} ({dim[dim_name]}x) over the wet "
+                            f"faces (mask `{face_mask_name}`)"
+                        )
+
+            if skip_var:
+                continue
 
             # Finally, check if we need to do just simple subsampling
             for (dim_name, dim_var) in dim_names.items():
                 if cell_method[dim_var] == "point":
                     da = da.sel({dim_var: da[dim_var][::dim[dim_name]]})
+                    n = dim[dim_name]
+                    # Coarsening factors are small single/double digits in practice.
+                    ordinal = {1: "st", 2: "nd", 3: "rd"}.get(n, "th")
+                    clauses.append(
+                        f"subsampled along {dim_name} (every {n}{ordinal} "
+                        f"`{dim_var}` position)"
+                    )
+
+            if clauses:
+                provenance[v] = f"Horizontally coarsened: {'; '.join(clauses)}."
 
         if v in ds.data_vars:
             ds_coarse[v] = da
@@ -231,9 +291,13 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
 
     for c in coord_vars:
         ds_coarse[c].attrs = ds[c].attrs
+        # `comment` (the CF attribute) rather than the ad-hoc `note` this used to
+        # write, so that everything explanatory lives under one key.
+        ds_coarse[c].attrs.pop("note", None)
         if c == "areacello":
-            ds_coarse[c].attrs["note"] = (
-                "We ignore land cells in partially wet cells when coarsening, "
+            ds_coarse[c].attrs["comment"] = (
+                "Ocean (wet) area of the coarse cell. We ignore land cells in "
+                "partially wet cells when coarsening, "
                 "so that tracer content can be accurately reconstructed "
                 "by multiplying coarsened area-averaged tendencies by it. "
                 "Fully wet (`wet==1.0`) and fully dry (`wet==0.0`) cells "
@@ -242,24 +306,39 @@ def horizontally_coarsen(ds, grid, dim, skip_coords=False):
                 "be derived from the ocean area by divding `areacello` by `wet`."
             )
         elif c == "wet":
-            ds_coarse[c].attrs["note"] = (
-                "Can be between 0 and 1 if coarse cell includes both wet "
-                "and dry sub-cells."
+            ds_coarse[c].attrs["comment"] = (
+                "Ocean area fraction of the coarse tracer cell. Can be between 0 "
+                "and 1 if the coarse cell includes both wet and dry sub-cells."
             )
-        elif c in ["wet_u", "wet_v"]:
-            ds_coarse[c].attrs["note"] = (
-                "Can be between 0 and 1 if coarse face includes both wet "
-                "and dry sub-faces."
+        elif c == "wet_u":
+            ds_coarse[c].attrs["comment"] = (
+                "Ocean fraction of the coarse u-face (the eastern/western face of "
+                "the tracer cell). Can be between 0 and 1 if the coarse face "
+                "includes both wet and dry sub-faces."
             )
+        elif c == "wet_v":
+            ds_coarse[c].attrs["comment"] = (
+                "Ocean fraction of the coarse v-face (the northern/southern face of "
+                "the tracer cell). Can be between 0 and 1 if the coarse face "
+                "includes both wet and dry sub-faces."
+            )
+
+    # Stamp the per-variable provenance only now: the coordinate-attribute restore
+    # just above, and the `da.attrs = attrs` reassignments inside the loop, replace
+    # `.attrs` wholesale and would have dropped anything written earlier.
+    for (v, sentence) in provenance.items():
+        if v in ds_coarse.data_vars:
+            append_provenance(ds_coarse[v], sentence)
+        elif v in ds_coarse.coords:
+            append_provenance(ds_coarse.coords[v], sentence)
 
     coarsening_comment = f"""Diagnostics have been conservatively coarsened by Henri F. Drake
 (hfdrake@uci.edu) using the CM4Xutils python package v{__version__}
-(https://github.com/hdrake/CM4Xutils) and with coarsening factors of {dim}. """
-    if "provenance" in ds_coarse.attrs:
-        ds_coarse.attrs["provenance"] += coarsening_comment
-    else: 
-        ds_coarse.attrs["provenance"] = coarsening_comment
-        
+(https://github.com/hdrake/CM4Xutils) and with coarsening factors of {dim}. The
+weighting depends on each variable's `cell_methods`; see the per-variable
+`provenance` attribute for what was actually applied to each one. """
+    append_provenance(ds_coarse, coarsening_comment)
+
     return ds_coarse
 
 def subsample_geocoords(ds_coarse, ds, grid, dim):
