@@ -311,13 +311,13 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     av_ice = av_ice.rename({"xT":"xh_ice", "yT":"yh_ice"})
     av_ice = av_ice.assign_coords({"time":av_tend.time})
     
-    averages = xr.merge([av_tend, av_surf, av_ice]).chunk(chunk)
+    averages = chunk_dataset(xr.merge([av_tend, av_surf, av_ice]), chunk)
 
     # Case 1: We are either reading in all times or just the first 5-year interval.
     # In either case, there is no prior 5 yr interval, so we're missing the initial snapshot.
     if (time=="*") | (time=="000101*"):
         pdict_snap = get_wmt_pathDict(model, exp, "snapshot", time=time)
-        snapshots = gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror).chunk(chunk_center)
+        snapshots = chunk_dataset(gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror), chunk_center)
 
     # Case 2: we are only reading in a specific 5 yr interval,
     # in which case we also need the last snapshot from the prior interval.
@@ -347,8 +347,8 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
         pdict_snap = get_wmt_pathDict(model, exp, "snapshot", time=time)
         snapshots = xr.concat(
             [
-                gu.open_frompp(**pdict_snap_preceding, dmget=dmget, mirror=mirror).chunk(chunk_center).isel(time=-1),# only the last
-                gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror).chunk(chunk_center)
+                chunk_dataset(gu.open_frompp(**pdict_snap_preceding, dmget=dmget, mirror=mirror), chunk_center).isel(time=-1),# only the last
+                chunk_dataset(gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror), chunk_center)
             ],
             dim="time"
         )
@@ -628,7 +628,7 @@ def load_rho2_transports(model, exp, time="*", dmget=False, mirror=False, transp
         pp, ppname, out, local, time, load_vars,
         dmget=dmget, mirror=mirror
     )
-    ds = ds.chunk({"time": 1, "rho2_l": -1})
+    ds = chunk_dataset(ds, {"time": 1, "rho2_l": -1})
 
     og = gu.open_static(pp, ppname)
     sg = xr.open_dataset(exp_dict[model]["hgrid"])
@@ -744,7 +744,7 @@ def load_tracer(odiv, tracer, time="*"):
                 dmget=True
             ).isel(time=np.arange(5, 10, 1))
   
-    ds = ds.chunk({"time":1, "z_l":-1})
+    ds = chunk_dataset(ds, {"time":1, "z_l":-1})
     
     return ds
 
@@ -760,7 +760,7 @@ def load_density(odiv, time="*"):
         pp, ppname, out, local, time, state_vars,
         dmget=True
     )
-    ds = ds.chunk({"time":1, "z_l":-1})
+    ds = chunk_dataset(ds, {"time":1, "z_l":-1})
     
     c_attrs = {c:ds.coords[c].attrs.copy() for c in ds.coords}
 
@@ -822,7 +822,7 @@ def load_density_annual(odiv, time="*"):
         pp, ppname, out, local, time, state_vars,
         dmget=True
     )
-    ds = ds.chunk({"time":1, "zl":-1, "zi":-1})
+    ds = chunk_dataset(ds, {"time":1, "zl":-1, "zi":-1})
     ds = ds.drop_vars(["rsdo"])
     
     c_attrs = {c:ds.coords[c].attrs.copy() for c in ds.coords}

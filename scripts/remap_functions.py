@@ -122,7 +122,10 @@ def remap_budgets_to_sigma2_and_coarsen(model, start_year):
     ]
     ds_sigma2_coarse = ds_sigma2_coarse.transpose(*ordered_dims)
 
-    return ds_sigma2_coarse.chunk({d:-1 for d in ds_sigma2_coarse.dims if "time" not in d})
+    return chunk_dataset(
+        ds_sigma2_coarse,
+        {d:-1 for d in ds_sigma2_coarse.dims if "time" not in d}
+    )
 
 
 def remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year):
@@ -152,7 +155,10 @@ def remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year):
     
     # Interpolate from annual-means to monthly-means (to match other transient tracers)
     interp_kwargs = {"fill_value": "extrapolate"}
-    age = age.interp(time=ds.time, kwargs=interp_kwargs).chunk({"time":1, "z_l":-1})
+    age = chunk_dataset(
+        age.interp(time=ds.time, kwargs=interp_kwargs),
+        {"time":1, "z_l":-1}
+    )
     age["average_DT"] = ds.average_DT
     
     # Zero-out negative ages (due to extrapolation of time interpolation in first few months)
@@ -186,7 +192,7 @@ def remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year):
     with warnings.catch_warnings():
         warnings.simplefilter(action='ignore', category=FutureWarning)
     
-        ds_age_sigma2 = remap_vertical_coord("sigma2", ds_age.chunk({"z_l":-1}), grid_age)
+        ds_age_sigma2 = remap_vertical_coord("sigma2", chunk_dataset(ds_age, {"z_l":-1}), grid_age)
         grid_age_sigma2 = ds_to_grid(ds_age_sigma2)
 
     # Coarsen
@@ -216,4 +222,7 @@ def remap_tracers_to_sigma2_and_coarsen(model, experiment, start_year):
     ordered_dims = ['time', 'sigma2_l', 'sigma2_i', 'yh', 'yq', 'xh', 'xq']
     ds_sigma2_coarse = ds_sigma2_coarse.transpose(*ordered_dims)
 
-    return ds_sigma2_coarse.chunk({d:-1 for d in ds_sigma2_coarse.dims if "time" not in d})
+    return chunk_dataset(
+        ds_sigma2_coarse,
+        {d:-1 for d in ds_sigma2_coarse.dims if "time" not in d}
+    )

@@ -173,7 +173,7 @@ sigma2 grid is the 74-layer coordinate in `data/sigma2_coords.nc`, which
 `add_sigma2_coords` loads and pads with one extra layer at each end to cover all
 plausible ocean densities.
 
-**Transports come from the native rho2 diagnostics where available (v1.4.0+).** MOM6
+**Transports come from the native rho2 diagnostics where available (v2.0.0+).** MOM6
 accumulates the layer-integrated mass transports `umo`/`vmo` *online* into
 potential-density (`rho2`) layers in the `ocean_month_rho2` pp output, where they conserve
 mass exactly within each layer. The budget pipeline sources them from there:
@@ -194,10 +194,10 @@ product's horizontal coordinates onto the coarsened transports before merging th
 (CM4Xp25) it falls back to the older offline z→sigma2 transport remap for both terms — via
 `itp_tracer_to_transports` (the v1.2.0 fix, returning NaN where either neighbor is dry),
 preserved behind `remap_vertical_coord(..., remap_transports=True)` (the default). So only
-CM4Xp125 changes *transport provenance* in v1.4.0. CM4Xp25 `umo`/`vmo` still change
+CM4Xp125 changes *transport provenance* in v2.0.0. CM4Xp25 `umo`/`vmo` still change
 numerically, because the EOS change below shifts the sigma2 bins they are accumulated into.
 
-### The offline sigma2 uses the model's own EOS (v1.4.0+)
+### The offline sigma2 uses the model's own EOS (v2.0.0+)
 
 CM4X ran with `EQN_OF_STATE = "WRIGHT"`, so the offline sigma2 coordinate is computed with
 the same MOM6 Wright (1997) reduced-range EOS via `xeos`, not gsw/TEOS-10.
@@ -210,7 +210,7 @@ geometric and never evaluates the EOS.) `cm4x_watermass` declares
 `xwmt`'s conservative/absolute default, reproduces the model's arithmetic. This shifts
 sigma2 by O(0.01–0.1 kg/m³) versus ≤v1.3.0 and matches the online density to ~1e-12 kg/m³.
 
-The two v1.4.0 changes are complementary: the native-transport path relabels the model's
+The two v2.0.0 changes are complementary: the native-transport path relabels the model's
 own `rho2` layers as sigma2, and this makes the offline sigma2 coordinate use the same
 equation of state that defined those layers.
 
@@ -227,7 +227,7 @@ package version, update the dataset `version`/`version_notes` strings in
 directories (`data/coarsened_d2_bug/`, `data/coarsened_incorrect_wetmask/`,
 `data/coarsened_nanbugged/`, …) for comparison — don't delete these.
 
-Two of those parallel directories exist specifically to isolate the two v1.4.0 changes
+Two of those parallel directories exist specifically to isolate the two v2.0.0 changes
 from each other for the 2010-2014 CM4Xp125 interval:
 
 - `data/coarsened_pre_native_transports/` — offline transports, **gsw** sigma2.
@@ -242,19 +242,21 @@ staged output.
 
 ## Known rough edges
 
-- Datasets in `data/coarsened/` predate v1.4.0: they were written without the `thkcello`
+- Datasets in `data/coarsened/` predate v2.0.0: they were written without the `thkcello`
   that `add_grid_coords` derives from `volcello/areacello`, and with `umo`/`vmo` derived by
   the old offline z→sigma2 remap rather than the native `ocean_month_rho2` diagnostics
-  (v1.4.0+). They need regeneration; `scripts/coarsen_sigma2_budgets.py` now stamps
-  `v1.4.0`, but `scripts/coarsen_sigma2_tracers.py` may still read an older string.
-- **xarray >= 2026.7.0 breaks the generation scripts.** Nothing pins xarray, so a freshly
-  solved environment picks up 2026.7.0, where rechunking a dask-backed *cftime* variable
-  with a chunk dict that does not name all of its dims raises
-  `ValueError: zip() argument 2 is longer than argument 1` (`_get_chunk` builds
-  `dims` from `chunks.keys()` and then `zip(dims, shape, strict=True)`). The module-level
-  `chunk` dict in `loading.py` omits `nv`, so `load_wmt_averages_and_snapshots` dies on
-  `time_bnds` at `xr.merge([...]).chunk(chunk)`. Known-good: xarray 2025.10.1. Either pin
-  xarray < 2026.7.0 or add the missing dims to `chunk`/`chunk_center`.
+  (v2.0.0+). They need regeneration; `scripts/coarsen_sigma2_budgets.py` now stamps
+  `v2.0.0`, but `scripts/coarsen_sigma2_tracers.py` may still read an older string.
+- **Never call `Dataset.chunk` directly — use `chunk_dataset(ds, chunks)`.** How xarray
+  treats a chunk dict that does not name every dim of a variable is version-dependent: in
+  xarray >= 2026.7.0, rechunking a dask-backed *cftime* variable that way raises
+  `ValueError: zip() argument 2 is longer than argument 1` (`_get_chunk` builds `dims`
+  from `chunks.keys()`, then does `zip(dims, shape, strict=True)`). Every chunk dict here
+  omits something — `nv` on `time_bnds`, the `xh_ice`/`yh_ice` ice grid, `exp` — so the
+  loaders died on `time_bnds` partway through a five-year interval under 2026.7.0.
+  `chunk_dataset` (grid_preprocess.py) completes the dict against `ds.dims` first, leaving
+  unnamed dims at their current chunking. `DataArray.chunk` on float data is unaffected;
+  only cftime arrays reach that code path.
 - The existing per-worktree conda environments predate the `CM4Xutils_<name>` naming
   convention and do not follow it, though each is correctly editable-installed against
   its own worktree: `cm4xutils-xeos` → `xwmt-xeos-eos`, `CM4Xutils-rho2-transports` →

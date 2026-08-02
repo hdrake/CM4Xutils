@@ -9,6 +9,7 @@ module in the package. It provides the building blocks of the loading pipeline:
 - `add_sigma2_coords` attaches the target density coordinate used for remapping.
 - The `*_cell_methods` helpers parse and serialize the ``cell_methods`` attribute
   strings that both coarsening and vertical remapping dispatch on.
+- `chunk_dataset` is the version-robust replacement for ``Dataset.chunk``.
 """
 
 import os
@@ -25,6 +26,50 @@ from xgcm import Grid
 # any density the ocean actually attains.
 SIGMA2_MIN = -10.
 SIGMA2_MAX = 50.
+
+def chunk_dataset(ds, chunks):
+    """`ds.chunk(chunks)`, with every dimension of `ds` named explicitly.
+
+    `Dataset.chunk` accepts a partial dict, but the tolerance for one is
+    version-dependent. In xarray >= 2026.7.0, rechunking a dask-backed *cftime*
+    variable whose dims are not all named raises
+    ``ValueError: zip() argument 2 is longer than argument 1``: `_get_chunk` derives
+    ``dims`` from ``chunks.keys()`` and then zips it against the array shape with
+    ``strict=True``. The chunk dicts used here routinely omit dims that appear only
+    on such variables -- ``nv`` on ``time_bnds``, the ``xh_ice``/``yh_ice`` sea-ice
+    grid -- so the loaders die on `time_bnds` partway through a five-year interval.
+
+    Completing the dict here removes the dependence on that tolerance entirely,
+    which is cheaper than pinning xarray and does not have to be revisited when the
+    next version changes the rule again.
+
+    Parameters
+    ----------
+    ds : `xr.Dataset`
+    chunks : dict, dim name -> chunk size, may name only some of `ds.dims`
+
+    Returns
+    -------
+    ds : `xr.Dataset`, chunked
+
+    Notes
+    -----
+    Dims the caller did not name keep whatever chunking they already have, so this
+    is equivalent to the partial-dict call rather than a re-chunk. The fallback of a
+    single chunk applies only where a dim is unchunked or inconsistently chunked
+    across variables.
+    """
+    chunks = dict(chunks)
+    for dim in ds.dims:
+        if dim in chunks:
+            continue
+        existing = {
+            var.chunksizes[dim]
+            for var in ds.variables.values()
+            if var.chunks is not None and dim in var.dims
+        }
+        chunks[dim] = existing.pop() if len(existing) == 1 else -1
+    return ds.chunk(chunks)
 
 def fix_geo_coords(og, sg):
     """Fix geographical coordinates from static file with supergrid

@@ -2,7 +2,7 @@
 # coding: utf-8
 import sys
 import numpy as np
-from CM4Xutils import __version__
+from CM4Xutils import __version__, chunk_dataset
 from remap_functions import remap_budgets_to_sigma2_and_coarsen
 
 # The dataset release is versioned in lockstep with the package that generated it, so
@@ -24,7 +24,7 @@ for start_year in np.arange(interval_start, interval_start+interval_length, 5):
     
     filename = f"../data/coarsened/{model}_budgets_sigma2_{year_range}.zarr"
     ds = remap_budgets_to_sigma2_and_coarsen(model, start_year)
-    ds = ds.chunk({"time":1, "time_bounds":1})
+    ds = chunk_dataset(ds, {"time":1, "time_bounds":1})
     ds.attrs["version"] = f"v{__version__}"
     ds.attrs["version_notes"] = version_notes
     ds.to_zarr(filename, mode="w")
