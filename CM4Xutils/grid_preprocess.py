@@ -89,8 +89,13 @@ def chunk_dataset(ds, chunks):
     is equivalent to the partial-dict call rather than a re-chunk. The fallback of a
     single chunk applies only where a dim is unchunked or inconsistently chunked
     across variables.
+
+    Dims named in `chunks` that `ds` does not have are ignored, so one shared chunk
+    spec (e.g. the module-level `chunk` in loading.py) can be applied to the tendency,
+    surface and sea-ice datasets alike even though each carries a different subset of
+    the dims.
     """
-    chunks = dict(chunks)
+    chunks = {d: c for (d, c) in chunks.items() if d in ds.dims}
     for dim in ds.dims:
         if dim in chunks:
             continue

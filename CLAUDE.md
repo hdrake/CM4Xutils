@@ -286,6 +286,22 @@ staged output.
   `chunk_dataset` (grid_preprocess.py) completes the dict against `ds.dims` first, leaving
   unnamed dims at their current chunking. `DataArray.chunk` on float data is unaffected;
   only cftime arrays reach that code path.
+- **Chunk at load time, and name every dim — unnamed dims are left to the *file*, not left
+  whole.** `open_frompp` sets no `chunks=` of its own, so an unchunked open gives one dask
+  chunk per variable per 5-year file (114 GB for native `vmo`), and rechunking afterwards
+  cannot fix it. Worse, a spec that omits the horizontal dims inherits the file's own
+  layout, and the experiments differ: `historical` is contiguous netCDF3 while `piControl`
+  is stored in 280 × 360 horizontal blocks, so the *same* loader returned 600 blocks for
+  one and 38,400 for the other. That propagated until `umo` left `horizontally_coarsen`
+  with 2.7 million tasks for a single month, and the graph — not the data — filled ~120 GB.
+  `OPEN_CHUNKS` / `RHO2_OPEN_CHUNKS` spell out `yh`/`yq`/`xh`/`xq` as `-1` for this reason.
+  Corollary for benchmarking: anything timed only against `historical` will look fine and
+  mispredict the pipeline, since that is the experiment without the pathology.
+- **Peak memory grows steeply with the months written per `to_zarr` call**, so budget
+  writes go through `write_in_time_batches` (4 months ≈ 47 GB; 6 ≈ 87 GB; all 60 at once
+  does not fit a 125 GB node). Throughput is flat at ~200 s/month, so a smaller batch costs
+  almost nothing. Measure peak with `sacct MaxRSS`, **not** an in-process sampler thread —
+  that thread is GIL-starved while numpy computes and undercounts by ~2×.
 - `CM4Xutils/.ipynb_checkpoints/` is untracked and gitignored. As of v1.3.0 its module
   copies are absorbed into the live modules, **except** `new_loading-checkpoint.py`, which
   is the only surviving copy of a removed `new_loading` module

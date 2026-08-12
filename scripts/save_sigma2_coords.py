@@ -14,7 +14,7 @@ import xarray as xr
 import doralite
 import gfdl_utils.core as gu
 
-from CM4Xutils import exp_dict
+from CM4Xutils import exp_dict, OPEN_CHUNKS
 
 odiv = exp_dict["CM4Xp25"]["piControl"]
 time = "010101*"
@@ -23,7 +23,11 @@ pp = doralite.dora_metadata(odiv)["pathPP"]
 ppname = "ocean_month_rho2"
 out = "ts"
 local = gu.get_local(pp, ppname, out)
-ds = gu.open_frompp(pp, ppname, out, local, time, "thkcello", dmget=True)
+# Only the 74/75-element `rho2_l`/`rho2_i` coordinates are read below, but without
+# `chunks=` this opens `thkcello` as a single 27.6 GB dask chunk.
+ds = gu.open_frompp(
+    pp, ppname, out, local, time, "thkcello", dmget=True, chunks=OPEN_CHUNKS
+)
 
 sigma2_coords = xr.Dataset(
     coords={
