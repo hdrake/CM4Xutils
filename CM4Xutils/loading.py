@@ -801,9 +801,6 @@ def load_rho2_transports(model, exp, time="*", dmget=False, mirror=False, transp
     local = gu.get_local(pp, ppname, out)
     if transport_vars is None:
         transport_vars = available_rho2_transports(model, exp)
-    # Transports only. `thkcello` used to be loaded here too, which staged an entire extra
-    # per-variable time series from tape for every experiment of every interval and was
-    # then discarded unread.
     load_vars = sorted(transport_vars)
     # Chunked at open (see `RHO2_OPEN_CHUNKS`), so no rechunk is needed here.
     ds = gu.open_frompp(
