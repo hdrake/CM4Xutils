@@ -219,8 +219,116 @@ def get_wmt_pathDict(model, exp, category, time="*", add="*"):
         "add": add
     }
 
+# Chunking applied at OPEN time, forwarded to `xr.open_mfdataset` by `open_frompp`.
+#
+# This cannot be replaced by rechunking afterwards. `open_frompp` sets no `chunks=` of its
+# own, so without this each variable arrives as a single dask chunk spanning the whole
+# 5-year file (114.62 GB for native `vmo`). Any later `chunk_dataset` is downstream of
+# that task, and dask must materialize the whole array before it can split it.
+#
+# Every dim you care about must be named. Unnamed dims are not "left whole" -- they
+# inherit the file's own layout, and the experiments differ: `historical` is contiguous
+# netCDF3, but `piControl` is stored with internal horizontal chunking, which the same
+# loader would otherwise turn into ~64x more blocks. `xr.open_mfdataset` silently ignores
+# keys a stream does not have, so one spec can cover the ocean, sea-ice and surface
+# streams; the corollary is that a misspelled dim is also ignored, silently restoring the
+# whole-file chunk. `assert_chunked` below guards against that.
+#
+# Block only along outer dims (`time`, and `rho2_l` below), never along `yh`/`xh`: these
+# files are laid out `(time, level, y, x)`, so an outer slab is one sequential read while
+# a horizontal block seeks once per row per level (measured 2.2x slower).
+#
+# Do NOT use `chunks="auto"`: it raises NotImplementedError on the cftime `time_bnds`
+# every GFDL pp time series carries.
+OPEN_CHUNKS = {"time": 1, "yh": -1, "yq": -1, "xh": -1, "xq": -1}
+
+# Optional tightening of the vertically-resolved streams; off by default, since one month
+# of d2 budget tendencies is ~226 MB and already well under the guard.
+_ZCHUNK = os.environ.get("CM4X_ZCHUNK")
+ZCHUNK = int(_ZCHUNK) if _ZCHUNK else None
+if ZCHUNK is not None:
+    OPEN_CHUNKS["z_l"] = ZCHUNK
+    OPEN_CHUNKS["z_i"] = ZCHUNK
+
+# The native `ocean_month_rho2` transports are the one stream `time:1` does not fully
+# tame: one month is still 74 x 2241 x 2880 x f32 = 1.91 GB (3.92 GB once upcast to f64).
+# `RHO2_OPEN_CHUNKS` is defined further down; it blocks `rho2_l` as well, and the comment
+# there explains why the blocking must happen at open and must be along an outer dim.
+
+
+MAX_OPEN_CHUNK_GB = 1.0
+
+
+def assert_chunked(ds, where="", max_gb=MAX_OPEN_CHUNK_GB):
+    """Fail loudly if any variable came back with an unreasonably large dask chunk.
+
+    Checks the *outcome*, in bytes, rather than whether a given dim name took effect,
+    because the failure mode is silent: `xr.open_mfdataset` ignores `chunks=` keys for dims
+    a dataset does not have -- which is what lets one spec serve the ocean, sea-ice and
+    surface streams -- so a misspelled dim is equally ignored and restores the whole-file
+    chunk with no error. A size check catches every version of that (typo, unexpected
+    stream, unexpected file layout) and costs nothing, since chunk sizes are metadata.
+    Intended chunks here are 26-226 MB, so the 1 GB default has wide margin.
+    """
+    offenders = []
+    for name, var in ds.variables.items():
+        if var.chunks is None:
+            continue
+        gb = np.prod([c[0] for c in var.chunks]) * var.dtype.itemsize / 1e9
+        if gb > max_gb:
+            offenders.append((gb, name, [c[0] for c in var.chunks]))
+    if offenders:
+        offenders.sort(reverse=True)
+        detail = "; ".join(f"{n} {c} = {g:.1f} GB" for g, n, c in offenders[:4])
+        raise ValueError(
+            f"open{' in ' + where if where else ''} produced chunks over {max_gb} GB "
+            f"({detail}). Almost always this means `chunks=` was not applied -- check the "
+            f"dim names against {sorted(ds.dims)}, since keys xarray does not recognize "
+            f"are silently ignored. Rechunking afterwards will NOT fix it: any later "
+            f".chunk() is downstream of the oversized task and dask must materialize it."
+        )
+
+# Horizontal dims stay whole. Blocking them is what made reads strided and cost ~40x in
+# throughput -- see the note on `RHO2_OPEN_CHUNKS`. Block `time` and levels instead.
 chunk = {"time":1, "z_l":-1, "yh":-1, "xh":-1, "yq":-1, "xq":-1}
 chunk_center = {"time":1, "z_l":-1, "yh":-1, "xh":-1}
+
+# Chunking for the online-remapped `ocean_month_rho2` transports.
+#
+# These are archived at NATIVE resolution (2240 x 2880 for CM4Xp125) while the budget
+# tendencies are on the 2x-coarsened d2 grid, so a whole month is 1.91 GB (3.92 GB once
+# upcast to float64), and `horizontally_coarsen` holds roughly a dozen same-sized
+# temporaries per output chunk. `rho2_l: 8` puts a chunk near 200 MB instead.
+#
+# Two things must hold at once, and only blocking along `rho2_l` achieves both:
+#
+# (1) The blocking must happen AT OPEN. Re-blocking afterwards leaves the rechunk's source
+#     as one whole-field chunk, so every small output block still depends on all of it:
+#     3.99 GB to compute one output block, 3.94 GB to compute four -- a fixed cost with no
+#     marginal component.
+# (2) The blocked dim must be an OUTER one, since a slab of levels is one sequential read
+#     while a horizontal block seeks once per row per level.
+#
+# Measured on one month of coarsened `umo`, each variant reading a different month so none
+# is warmed by another's page cache:
+#
+#     whole month        11.11 GB   25.7 s
+#     horizontal blocks   1.55 GB   57.2 s   (7.2x less memory, 2.23x slower)
+#     rho2_l blocks       1.57 GB   17.0 s   (7.1x less memory, 1.5x faster)
+#
+# Horizontal extent stays whole, which also suits the {X:12, Y:10} coarsening: no window
+# straddles a chunk boundary, so dask never inserts a mid-graph rechunk. And as with
+# `OPEN_CHUNKS`, the horizontal `-1`s are load-bearing -- omitting them lets `piControl`'s
+# stored 280 x 360 blocking through, which took `umo` from 600 to 38,400 blocks at load
+# and from 42k to 2.7 MILLION tasks after coarsening. That task count, not any chunk's
+# size, was the dominant cost: the peak was the graph itself.
+_RLCHUNK = int(os.environ.get("CM4X_RHO2_LCHUNK", "8"))
+RHO2_OPEN_CHUNKS = {
+    "time": 1, "rho2_l": _RLCHUNK,
+    "yh": -1, "yq": -1, "xh": -1, "xq": -1,
+}
+
+
 def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=False):
     """Load time-averaged WMT budget diagnostics and their bounding snapshots.
 
@@ -248,7 +356,15 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
 
     # Get time-averaged heat and salt budget tendencies
     pdict_tend = get_wmt_pathDict(model, exp, "tendency", time=time)
-    av_tend = gu.open_frompp(**pdict_tend, dmget=dmget, mirror=mirror)
+    av_tend = gu.open_frompp(**pdict_tend, dmget=dmget, mirror=mirror, chunks=OPEN_CHUNKS)
+    # Chunk to one month *before* deriving anything. `open_frompp` does not pass
+    # `chunks=`, so each variable arrives as a single whole-file (60-month) dask chunk.
+    # Any transformation applied at that granularity becomes one task producing a
+    # multi-GB array that all 60 output chunks depend on, and dask cannot fuse a
+    # later slice back through a `diff`/`interp`/`coarsen` -- so the whole thing has
+    # to stay resident until the last output chunk is written. Rechunking first keeps
+    # every derived quantity per-month and streamable.
+    av_tend = chunk_dataset(av_tend, chunk)
 
     # Derive shortwave flux convergence from shortwave fluxes
     if "rsdo" in av_tend.data_vars:
@@ -283,7 +399,11 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     salt_fluxes = ["sfdsi"]
     surf_vars = state_vars + mass_fluxes + mome_fluxes + heat_fluxes + salt_fluxes
     pdict_surf = get_wmt_pathDict(model, exp, "surface" , time=time, add=surf_vars)
-    av_surf = gu.open_frompp(**pdict_surf, dmget=dmget, mirror=mirror)
+    av_surf = gu.open_frompp(**pdict_surf, dmget=dmget, mirror=mirror, chunks=OPEN_CHUNKS)
+    # Same reasoning as for `av_tend`, and it matters most here: for CM4Xp125 these
+    # are native-resolution fields that get interpolated and then 2x2-coarsened below,
+    # which at whole-file granularity is ~0.8 GB resident per variable per experiment.
+    av_surf = chunk_dataset(av_surf, chunk)
 
     # Interpolate wind stress to tracer points for simplicity
     hcoords = {
@@ -342,12 +462,13 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     
     ice_vars = ["siconc", "sithick", "LSNK", "LSRC", "EVAP", "SNOWFL", "RAIN"]
     pdict_ice = get_wmt_pathDict(model, exp, "ice" , time=time, add=ice_vars)
-    av_ice = gu.open_frompp(**pdict_ice, dmget=dmget, mirror=mirror)
+    av_ice = gu.open_frompp(**pdict_ice, dmget=dmget, mirror=mirror, chunks=OPEN_CHUNKS)
     av_ice = av_ice.drop_dims(
         [d for d in av_ice.dims if d not in ["time", "yT", "xT"]]
     )
     av_ice = av_ice.rename({"xT":"xh_ice", "yT":"yh_ice"})
     av_ice = av_ice.assign_coords({"time":av_tend.time})
+    av_ice = chunk_dataset(av_ice, chunk)
     
     averages = chunk_dataset(xr.merge([av_tend, av_surf, av_ice]), chunk)
 
@@ -355,7 +476,7 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     # In either case, there is no prior 5 yr interval, so we're missing the initial snapshot.
     if (time=="*") | (time=="000101*"):
         pdict_snap = get_wmt_pathDict(model, exp, "snapshot", time=time)
-        snapshots = chunk_dataset(gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror), chunk_center)
+        snapshots = chunk_dataset(gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror, chunks=OPEN_CHUNKS), chunk_center)
 
     # Case 2: we are only reading in a specific 5 yr interval,
     # in which case we also need the last snapshot from the prior interval.
@@ -385,8 +506,8 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
         pdict_snap = get_wmt_pathDict(model, exp, "snapshot", time=time)
         snapshots = xr.concat(
             [
-                chunk_dataset(gu.open_frompp(**pdict_snap_preceding, dmget=dmget, mirror=mirror), chunk_center).isel(time=-1),# only the last
-                chunk_dataset(gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror), chunk_center)
+                chunk_dataset(gu.open_frompp(**pdict_snap_preceding, dmget=dmget, mirror=mirror, chunks=OPEN_CHUNKS), chunk_center).isel(time=-1),# only the last
+                chunk_dataset(gu.open_frompp(**pdict_snap, dmget=dmget, mirror=mirror, chunks=OPEN_CHUNKS), chunk_center)
             ],
             dim="time"
         )
@@ -680,12 +801,14 @@ def load_rho2_transports(model, exp, time="*", dmget=False, mirror=False, transp
     local = gu.get_local(pp, ppname, out)
     if transport_vars is None:
         transport_vars = available_rho2_transports(model, exp)
-    load_vars = sorted(transport_vars) + ["thkcello"]
+    load_vars = sorted(transport_vars)
+    # Chunked at open (see `RHO2_OPEN_CHUNKS`), so no rechunk is needed here.
     ds = gu.open_frompp(
         pp, ppname, out, local, time, load_vars,
-        dmget=dmget, mirror=mirror
+        dmget=dmget, mirror=mirror,
+        chunks=RHO2_OPEN_CHUNKS,
     )
-    ds = chunk_dataset(ds, {"time": 1, "rho2_l": -1})
+    assert_chunked(ds, where="load_rho2_transports")
 
     og = gu.open_static(pp, ppname)
     sg = xr.open_dataset(exp_dict[model]["hgrid"])
@@ -786,19 +909,19 @@ def load_tracer(odiv, tracer, time="*"):
     local = gu.get_local(pp, ppname, out)
     if (local.split("/")[1] == "5yr") or (time=="*"):
         ds = gu.open_frompp(
-                pp, ppname, out, local, time, tracer,
-                dmget=True
-            )
+            pp, ppname, out, local, time, tracer,
+            dmget=True, chunks=OPEN_CHUNKS,
+        )
     elif (local.split("/")[0] == "annual") and (local.split("/")[1] == "10yr"):
         if (int(time[:-1]) % 10) in [0,1]:
             ds = gu.open_frompp(
                 pp, ppname, out, local, time, tracer,
-                dmget=True
+                dmget=True, chunks=OPEN_CHUNKS,
             ).isel(time=np.arange(0, 5, 1))
         else:
             ds = gu.open_frompp(
                 pp, ppname, out, local, str(int(time[:-1]) - 5).zfill(4) + "*", tracer,
-                dmget=True
+                dmget=True, chunks=OPEN_CHUNKS,
             ).isel(time=np.arange(5, 10, 1))
     else:
         # Previously fell through with `ds` unbound, raising an opaque
@@ -822,7 +945,8 @@ def load_density(odiv, time="*"):
     local = gu.get_local(pp, ppname, out)
     ds = gu.open_frompp(
         pp, ppname, out, local, time, state_vars,
-        dmget=True
+        dmget=True,
+        chunks=OPEN_CHUNKS,
     )
     ds = chunk_dataset(ds, {"time":1, "z_l":-1})
     
@@ -878,7 +1002,8 @@ def load_density_annual(odiv, time="*"):
     local = gu.get_local(pp, ppname, out)
     ds = gu.open_frompp(
         pp, ppname, out, local, time, state_vars,
-        dmget=True
+        dmget=True,
+        chunks=OPEN_CHUNKS,
     )
     ds = chunk_dataset(ds, {"time":1, "zl":-1, "zi":-1})
     ds = ds.drop_vars(["rsdo"])
@@ -1058,7 +1183,7 @@ def make_wmt_grid(ds, overwrite_grid=True, overwrite_supergrid=True):
         if ds.attrs["model"] == "CM4Xp125":
             # Compute 3D wet_mask needed to correct budget diagnostics
             pdict_native = get_wmt_pathDict(ds.attrs["model"], "historical", "native", time="1850*")
-            ds_native = gu.open_frompp(**pdict_native, dmget=True)
+            ds_native = gu.open_frompp(**pdict_native, dmget=True, chunks=OPEN_CHUNKS)
             og_native = gu.open_static(pdict_native["pp"], pdict_native["ppname"])
             ds_native = add_grid_coords(ds_native, og_native)
             
