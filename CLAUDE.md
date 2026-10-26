@@ -71,13 +71,15 @@ Production data generation (run from `scripts/`, requires GFDL filesystem):
 
 ```bash
 cd scripts
-python coarsen_sigma2_budgets.py CM4Xp25 1750 5            # model, interval_start, interval_length (years)
+python coarsen_sigma2_budgets.py CM4Xp25 1750 5            # model, interval_start, interval_length (years)[, outdir]
 python coarsen_sigma2_tracers.py CM4Xp25 historical 1850 5 # model, experiment, interval_start, interval_length
 bash dmget_CM4Xp25-historical_ocean_month_rho2.sh          # pre-stage tape files
 ```
 
 Intervals are always multiples of 5 (the pp files are 5-year chunks). Outputs land in
-`data/coarsened/{model}_budgets_sigma2_{YYYY}-{YYYY}.zarr`.
+`data/coarsened/{model}_budgets_sigma2_{YYYY}-{YYYY}.zarr`, or in the optional fourth
+argument `outdir` for the budgets script — use that to regenerate a release into its own
+versioned folder without overwriting the current one.
 
 ## Architecture
 
@@ -220,6 +222,17 @@ preserved behind `remap_vertical_coord(..., remap_transports=True)` (the default
 CM4Xp125 changes *transport provenance* in v2.0.0. CM4Xp25 `umo`/`vmo` still change
 numerically, because the EOS change below shifts the sigma2 bins they are accumulated into.
 
+**The `piControl-spinup` (1750–1849) is an exception for CM4Xp125 too.** The v7 spinup
+wrote `ocean_month_rho2` on a 64-layer `rho2` coordinate, not the production runs' 74, and
+the two grids are not nested, so relabeling would put transports in the wrong density
+classes. `rho2_layers_match_sigma2_grid` probes the archived layer count (one file header,
+preferring a file already on disk since DMF has no partial recall) and
+`online_rho2_transport_vars` withholds the online path when it does not match; those
+intervals take the offline remap. The spinup also lacks some diagnostics added to
+`state_vars` later (e.g. CM4Xp25 `zos`); `drop_unarchived_vars` silently drops requested
+variables with no archived files instead of letting `open_frompp` fail the whole interval,
+but a category's *probe* variable is still required.
+
 ### The offline sigma2 uses the model's own EOS (v2.0.0+)
 
 CM4X ran with `EQN_OF_STATE = "WRIGHT"`, so the offline sigma2 coordinate is computed with
@@ -264,18 +277,14 @@ Differencing the WRIGHT copy against `data/coarsened/` isolates the transport ch
 fixed EOS; differencing it against `coarsened_pre_native_transports/` isolates the EOS
 change at fixed transport provenance.
 
+All 140 budget stores in `data/coarsened/` (both models, 1750–2099) were regenerated at
+v2.0.0 in August 2026 and carry `product_version = "2.0.0"`.
+
 `data/` is not git-tracked apart from `sigma2_coords.nc`; most of it is generated or
 staged output.
 
 ## Known rough edges
 
-- Datasets in `data/coarsened/` predate v2.0.0: they were written without the `thkcello`
-  that `add_grid_coords` derives from `volcello/areacello`, and with `umo`/`vmo` derived by
-  the old offline z→sigma2 remap rather than the online-remapped `ocean_month_rho2`
-  diagnostics
-  (v2.0.0+). They need regeneration. Both `scripts/coarsen_sigma2_*.py` now derive the
-  dataset `version` attribute from `CM4Xutils/version.py`, so it can no longer drift from
-  the package version the way the old hard-coded strings did.
 - **Never call `Dataset.chunk` directly — use `chunk_dataset(ds, chunks)`.** How xarray
   treats a chunk dict that does not name every dim of a variable is version-dependent: in
   xarray >= 2026.7.0, rechunking a dask-backed *cftime* variable that way raises
