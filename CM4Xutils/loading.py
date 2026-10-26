@@ -219,6 +219,39 @@ def get_wmt_pathDict(model, exp, category, time="*", add="*"):
         "add": add
     }
 
+def drop_unarchived_vars(pdict, model=None, exp=None):
+    """Drop requested variables that have no archived files, warning about each.
+
+    Not every CM4X experiment archives every diagnostic we ask for. The v7
+    `piControl-spinup` runs predate some of the diagnostics that the v8 production runs
+    save -- `zos`, for instance, exists for every CM4Xp25 experiment except the spinup.
+    `gfdl_utils.open_frompp` raises `FileNotFoundError` as soon as any one requested
+    variable resolves to zero files, so a single absent diagnostic takes down the whole
+    interval rather than merely being left out of the product.
+
+    Dropping is the historical behaviour, not a new leniency: the v1.2.0 spinup stores
+    were written before `zos` was requested at all and simply do not contain it.
+
+    Only the surface stream is filtered, and only variables listed explicitly in `add`.
+    A category's probe variable is not optional -- if that is missing, the pp component
+    was mis-resolved and failing loudly is correct.
+    """
+    if not isinstance(pdict.get("add"), list):
+        return pdict
+    have, missing = [], []
+    for v in pdict["add"]:
+        pathspp = gu.get_pathspp(
+            pdict["pp"], pdict["ppname"], pdict["out"], pdict["local"], pdict["time"], v
+        )
+        (have if glob.glob(pathspp) else missing).append(v)
+    if missing:
+        where = f"{model}-{exp}" if model else pdict["ppname"]
+        print(
+            f"Skipping variables not archived for {where}: {', '.join(missing)}. "
+            f"They will be absent from the output."
+        )
+    return {**pdict, "add": have}
+
 # Chunking applied at OPEN time, forwarded to `xr.open_mfdataset` by `open_frompp`.
 #
 # This cannot be replaced by rechunking afterwards. `open_frompp` sets no `chunks=` of its
@@ -399,6 +432,7 @@ def load_wmt_averages_and_snapshots(model, exp, time="*", dmget=False, mirror=Fa
     salt_fluxes = ["sfdsi"]
     surf_vars = state_vars + mass_fluxes + mome_fluxes + heat_fluxes + salt_fluxes
     pdict_surf = get_wmt_pathDict(model, exp, "surface" , time=time, add=surf_vars)
+    pdict_surf = drop_unarchived_vars(pdict_surf, model, exp)
     av_surf = gu.open_frompp(**pdict_surf, dmget=dmget, mirror=mirror, chunks=OPEN_CHUNKS)
     # Same reasoning as for `av_tend`, and it matters most here: for CM4Xp125 these
     # are native-resolution fields that get interpolated and then 2x2-coarsened below,
@@ -758,12 +792,66 @@ def available_rho2_transports(model, exp):
     base = os.path.join(pp, "ocean_month_rho2", "ts", local)
     return {v for v in ["umo", "vmo"] if glob.glob(os.path.join(base, f"*.{v}.nc"))}
 
+def rho2_layers_match_sigma2_grid(model, exp):
+    """Does this experiment's `rho2` coordinate match the target sigma2 grid?
+
+    The native-transport path relabels `rho2_l` as `sigma2_l` outright, which is only
+    valid when the archived layers *are* the interior of the target grid. The v7
+    `piControl-spinup` runs used a 64-layer `rho2` diagnostic where the v8 production
+    runs use 74, and the two are not nested -- 7 of the 64 spinup layer centers do not
+    appear in the 74-layer grid at all. Relabeling across that mismatch would silently
+    assign transports to the wrong density classes, so the spinup must take the offline
+    z->sigma2 remap instead (which is also what v1.2.0 did for every interval).
+
+    Only the header is needed, but DMF has no partial recall: touching an offline file
+    stages the whole thing. The time series are ~18 GB each, so we probe a file that is
+    already resident wherever possible, preferring the `av` climatologies (~1.9 GB) over
+    the `ts` files when a recall is unavoidable. Note `os.path.getsize` is no guide here
+    -- it reports the logical size of an offline file just the same.
+    """
+    pp = _rho2_pp(model, exp)
+    ts_local = gu.get_local(pp, "ocean_month_rho2", "ts")
+    # `query_ondisk` shells out to `dmls`, so ask about a whole directory at once rather
+    # than once per file.
+    av = os.path.join(pp, "ocean_month_rho2", "av", "monthly_5yr", "*.nc")
+    ts = os.path.join(pp, "ocean_month_rho2", "ts", ts_local)
+    # Search for an already-resident file widely -- the `ts` transports in particular are
+    # staged by the budget jobs themselves, so a campaign in flight usually has one --
+    # but stage from `av` if it comes to that, since those are ~10x smaller.
+    probe = None
+    for g in [av, os.path.join(ts, "*.thkcello.nc"),
+              os.path.join(ts, "*.umo.nc"), os.path.join(ts, "*.vmo.nc")]:
+        resident = sorted(p for (p, ondisk) in gu.query_ondisk(g).items() if ondisk)
+        if resident:
+            probe = resident[0]
+            break
+    if probe is None:
+        candidates = sorted(glob.glob(av)) or sorted(glob.glob(os.path.join(ts, "*.nc")))
+        if not candidates:
+            return False
+        probe = candidates[0]
+        print(f"Staging {os.path.basename(probe)} to read the {exp} rho2 coordinate.")
+        gu.issue_dmget([probe])
+        gu.wait_until_ondisk([probe])
+    with xr.open_dataset(probe, decode_times=False) as ds:
+        n_rho2 = ds.sizes["rho2_l"]
+    n_interior = len(target_sigma2_layers())
+    if n_rho2 != n_interior:
+        print(
+            f"{model}-{exp} archives {n_rho2} rho2 layers but the target sigma2 grid "
+            f"has {n_interior} interior layers; online-remapped transports cannot be "
+            f"relabeled onto it."
+        )
+        return False
+    return True
+
 def online_rho2_transport_vars(model, interval="all"):
     """Transport vars available online-remapped across *all* experiments in `interval`.
 
     Returns the intersection of `available_rho2_transports` over the experiments that
     `_interval_load_flags` selects, so the budget pipeline only sources a transport
-    from `ocean_month_rho2` when it exists for every branch it needs to concatenate.
+    from `ocean_month_rho2` when it exists for every branch it needs to concatenate,
+    *and* on the same layer coordinate the target sigma2 grid is built from.
     """
     flags = _interval_load_flags(model, interval)
     exps = [e for (e, key) in [
@@ -777,7 +865,13 @@ def online_rho2_transport_vars(model, interval="all"):
     for e in exps:
         a = available_rho2_transports(model, e)
         avail = a if avail is None else (avail & a)
-    return avail or set()
+    avail = avail or set()
+    # Only worth staging a probe file once the cheap filesystem check has already
+    # cleared: CM4Xp25 archives no `umo` at all and falls back regardless.
+    if avail == {"umo", "vmo"}:
+        if not all(rho2_layers_match_sigma2_grid(model, e) for e in exps):
+            return set()
+    return avail
 
 def load_rho2_transports(model, exp, time="*", dmget=False, mirror=False, transport_vars=None):
     """Load online-remapped density-coordinate mass transports for one experiment.

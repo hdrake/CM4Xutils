@@ -328,6 +328,17 @@ def ds_to_grid(ds, Zprefix=None):
         autoparse_metadata=False
     )
 
+def target_sigma2_layers():
+    """The 74 unpadded target sigma2 layer centers, as archived in `sigma2_coords.nc`.
+
+    This is the interior of the grid `add_sigma2_coords` builds, and the coordinate a
+    `rho2` diagnostic must match layer-for-layer to be relabeled rather than remapped.
+    """
+    dirname = os.path.dirname(__file__)
+    filename = os.path.join(dirname, "../data/sigma2_coords.nc")
+    with xr.open_dataset(filename) as sigma2_coords:
+        return sigma2_coords.sigma2_l.values
+
 def add_sigma2_coords(ds):
     """Add the standard CM4X 74-layer sigma2 coordinates to dataset.
 
